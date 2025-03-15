@@ -1,2 +1,18 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+
+# SQLite database files
+*.db
+
+# Word2Vec model
+models/trained_model.pkl
+
+# UI Assets
+assets/

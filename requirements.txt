@@ -1,0 +1,9 @@
+tkinter
+gensim
+numpy
+sqlite3
+scikit-learn
+opencv-python
+python-socketio
+flask-socketio
+flask evenlet
