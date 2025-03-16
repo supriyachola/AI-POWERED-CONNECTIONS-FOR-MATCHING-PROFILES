@@ -1,6 +1,7 @@
  AI-Powered Video Conferencing & Matching System 🎥🔍
 
 📌 Overview
+
 This project is an AI-powered real-time video conferencing system that intelligently matches users based on shared interests. Using Machine Learning, WebSockets, OpenCV, and Flask, the system ensures seamless video, audio, and text communication.
 
 🔹 AI-based Profile Matching – Uses Word2Vec & scikit-learn for smart interest-based recommendations.
@@ -9,6 +10,7 @@ This project is an AI-powered real-time video conferencing system that intellige
 🔹 Adaptive Learning – Improves match accuracy based on user interactions over time.
 
 📌 Features
+
 ✅ AI-Powered User Matching – Leverages Word2Vec for intelligent interest-based recommendations.
 ✅ Live Video & Audio Conferencing – Uses OpenCV and Flask-SocketIO for real-time communication.
 ✅ Text Chat Support – Integrated messaging system for seamless discussions.
@@ -16,6 +18,7 @@ This project is an AI-powered real-time video conferencing system that intellige
 ✅ Multi-Modal Communication – Supports text, voice, and video-based interactions.
 
 📌 Technologies Used
+
 Python – Core programming language.
 Flask – Backend web framework.
 WebSockets – Enables real-time communication.
@@ -25,6 +28,7 @@ Gensim (Word2Vec) – AI-powered user interest matching.
 pyaudio – Handles real-time voice communication.
 
 📌 Installation & Setup
+
 1️⃣ Clone the Repository
 2️⃣ Install Dependencies
 pip install flask opencv-python numpy websockets gensim pyaudio scikit-learn
@@ -39,12 +43,15 @@ python conferencing.py
 
 
 📌 Future Improvements
+
 🚀 Integrate WebRTC – For smoother and high-quality video calls.
 🚀 Multi-Language Support – Expand to multiple languages for broader accessibility.
 🚀 Advanced Sentiment Analysis – Improve user engagement with AI-driven emotional insights.
 
 
 📌 Contributors
+
+
 👨‍💻 Bhargav M.
 👩‍💻 Likitha D. G.
 👨‍💻 Pratham C.
