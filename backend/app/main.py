@@ -19,7 +19,7 @@ from .matching import normalize_interests, score_matches
 
 migrate_schema()
 
-app = FastAPI(title="Affinity Plus API", version="0.8.0")
+app = FastAPI(title="Affinity Plus API", version="0.9.0")
 origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173,https://affinityplus.vercel.app").split(",")]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 security = HTTPBearer()
@@ -85,10 +85,10 @@ def parse_interests(value):
 
 def profile_payload(profile):
     if not profile:
-        return {"bio": "", "looking_for": "", "interests": [], "age": None, "gender": "prefer_not_to_say", "country": "", "state": "", "city": "", "vibe": "", "preferred_gender": "any", "preferred_country": "any", "preferred_state": "any", "min_age": 18, "max_age": 100}
+        return {"bio": "", "looking_for": "", "interests": [], "age": None, "gender": "prefer_not_to_say", "country": "", "state": "", "city": "", "district": "", "vibe": "", "preferred_gender": "any", "preferred_country": "any", "preferred_state": "any", "min_age": 18, "max_age": 100}
     return {
         "bio": profile.bio or "", "looking_for": profile.looking_for or "", "interests": parse_interests(profile.interests),
-        "age": profile.age, "gender": profile.gender or "prefer_not_to_say", "country": profile.country or "", "state": profile.state or "", "city": profile.city or "", "vibe": profile.vibe or "",
+        "age": profile.age, "gender": profile.gender or "prefer_not_to_say", "country": profile.country or "", "state": profile.state or "", "city": profile.city or "", "district": profile.district or "", "vibe": profile.vibe or "",
         "preferred_gender": profile.preferred_gender or "any", "preferred_country": profile.preferred_country or "any", "preferred_state": profile.preferred_state or "any", "min_age": profile.min_age or 18, "max_age": profile.max_age or 100,
     }
 
@@ -117,119 +117,48 @@ def record_history(db: Session, user_id: int, other_user_id: int, action: str, c
     db.add(InteractionHistory(user_id=user_id, other_user_id=other_user_id, action=action, connection_id=connection_id))
 
 
-def matches_preference(me: Profile, other: Profile, session_gender: str = "any") -> bool:
-    """
-    Match using the user's real age, not display brackets.
+def rolling_window(age: int) -> tuple[int, int]:
+    return max(18, age - 3), min(100, age + 2)
 
-    The rolling window is intentionally asymmetric:
-      candidate age ∈ [me.age - 3, me.age + 2]
-    The candidate's own rolling window must also contain the requester.
-    This avoids hard walls at 18–24 / 25–34 / ... boundaries.
-    """
-    if me.age is None or other.age is None:
-        return False
 
-    me_low = max(18, me.age - 3)
-    me_high = min(100, me.age + 2)
-    other_low = max(18, other.age - 3)
-    other_high = min(100, other.age + 2)
-
-    if not (me_low <= other.age <= me_high):
-        return False
-    if not (other_low <= me.age <= other_high):
-        return False
-
+def gender_allowed(me: Profile, other: Profile, session_gender: str) -> bool:
     if session_gender not in PREFERRED_GENDERS:
         session_gender = "any"
     if session_gender != "any" and other.gender != session_gender:
         return False
-
-    # Respect a candidate's saved gender preference when present.
     if other.preferred_gender and other.preferred_gender != "any" and me.gender != other.preferred_gender:
         return False
-
     return True
 
 
-@app.get("/")
-def root():
-    return {"status": "ok", "service": "affinity-plus-api", "version": "0.6.0", "realtime": True}
-
-@app.get("/meta/india-states")
-def india_states():
-    return {"country": "India", "states": INDIA_STATES}
-
-@app.get("/presence/online")
-def presence_online(user: User = Depends(current_user)):
-    presence.sweep()
-    # The caller just touched presence via current_user, so they count too.
-    return {"online_count": max(presence.online_count(), 1)}
-
-@app.post("/presence/heartbeat")
-def presence_heartbeat(user: User = Depends(current_user)):
-    # current_user already touches presence; this just gives the frontend
-    # a cheap, regular ping to keep the user marked online + fetch the count.
-    presence.sweep()
-    return {"online_count": max(presence.online_count(), 1), "is_online": True}
-
-@app.post("/auth/register")
-def register(data: RegisterRequest, db: Session = Depends(get_db)):
-    username = data.username.strip()
-    if db.scalar(select(User).where(User.username == username)):
-        raise HTTPException(409, "Username already exists. Try another one.")
-    user = User(username=username, password_hash=hash_password(data.password), account_type="registered")
-    db.add(user); db.flush()
-    db.add(Profile(user_id=user.id, age=data.age, gender=data.gender))
-    db.commit()
-    return {"token": create_token(user.id), "user": public_user(user)}
-
-@app.post("/auth/login")
-def login(data: LoginRequest, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.username == data.username.strip()))
-    if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
-        raise HTTPException(401, "Invalid username or password")
-    return {"token": create_token(user.id), "user": public_user(user)}
-
-@app.post("/auth/guest")
-def guest(db: Session = Depends(get_db)):
-    username = make_guest_username(db)
-    user = User(username=username, email=None, password_hash=None, account_type="guest", guest_token=secrets.token_urlsafe(32))
-    db.add(user); db.flush(); db.add(Profile(user_id=user.id)); db.commit()
-    return {"token": create_token(user.id), "user": public_user(user), "message": "Guest session created."}
-
-@app.get("/me")
-def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
-    return {"id": user.id, "username": user.username, "account_type": user.account_type, "profile": profile_payload(profile)}
-
-@app.put("/me/location")
-def update_location(data: LocationRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
-    if not profile:
-        profile = Profile(user_id=user.id)
-        db.add(profile)
-    profile.city = data.city.strip()
-    profile.state = data.state.strip()
-    profile.country = data.country.strip()
-    db.commit()
-    return {"message": "Location updated", "profile": profile_payload(profile)}
+def age_allowed(me: Profile, other: Profile, strict_age: bool = True) -> bool:
+    if not strict_age:
+        return True
+    if me.age is None or other.age is None:
+        return False
+    me_low, me_high = rolling_window(me.age)
+    other_low, other_high = rolling_window(other.age)
+    return me_low <= other.age <= me_high and other_low <= me.age <= other_high
 
 
-@app.put("/me/profile")
-def update_profile(data: ProfileRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
-    if not profile:
-        profile = Profile(user_id=user.id); db.add(profile)
-    profile.bio = data.bio.strip(); profile.looking_for = data.looking_for.strip(); profile.interests = json.dumps(normalize_interests(data.interests))
-    profile.age = data.age; profile.gender = data.gender; profile.country = data.country.strip(); profile.state = data.state.strip(); profile.city = data.city.strip(); profile.vibe = data.vibe.strip()
-    profile.preferred_gender = data.preferred_gender; profile.preferred_country = data.preferred_country.strip() or "any"; profile.preferred_state = data.preferred_state.strip() or "any"; profile.min_age = data.min_age; profile.max_age = data.max_age
-    db.commit(); return {"message": "Profile updated", "profile": profile_payload(profile)}
+def location_allowed(me: Profile, other: Profile, scope: str) -> bool:
+    if scope == "district":
+        return bool(me.district and other.district and me.district.casefold() == other.district.casefold())
+    if scope == "state":
+        return bool(me.state and other.state and me.state.casefold() == other.state.casefold() and me.country.casefold() == other.country.casefold())
+    return True
 
 
-def ranked(user, db, session_gender: str = "any"):
+def matches_preference(me: Profile, other: Profile, session_gender: str = "any", location_scope: str = "district", strict_age: bool = True) -> bool:
+    return gender_allowed(me, other, session_gender) and age_allowed(me, other, strict_age) and location_allowed(me, other, location_scope)
+
+
+def ranked(user, db, session_gender: str = "any", location_scope: str = "district"):
     me = db.scalar(select(Profile).where(Profile.user_id == user.id))
     if not me or me.age is None:
         return []
+    if location_scope not in {"district", "state", "anywhere"}:
+        location_scope = "district"
 
     excluded = {x.candidate_id for x in db.scalars(select(DiscoveryAction).where(DiscoveryAction.user_id == user.id)).all()}
     excluded.update({x.blocked_user_id for x in db.scalars(select(Block).where(Block.user_id == user.id)).all()})
@@ -237,38 +166,71 @@ def ranked(user, db, session_gender: str = "any"):
     excluded.add(user.id)
     excluded.update({
         row.receiver_id if row.requester_id == user.id else row.requester_id
-        for row in db.scalars(
-            select(Connection).where(or_(Connection.requester_id == user.id, Connection.receiver_id == user.id))
-        ).all()
+        for row in db.scalars(select(Connection).where(or_(Connection.requester_id == user.id, Connection.receiver_id == user.id))).all()
     })
 
     candidates = []
     for p in db.scalars(select(Profile).where(Profile.user_id != user.id)).all():
-        if p.user_id in excluded or not matches_preference(me, p, session_gender):
+        if p.user_id in excluded or not gender_allowed(me, p, session_gender):
             continue
         other = db.get(User, p.user_id)
         if other:
-            candidates.append(public_person(other, p))
+            candidates.append((other, p, public_person(other, p)))
+
+    # Quiet fallback ladder. We only move to the next tier when the current
+    # tier has no candidate, so matching never dead-ends on a strict filter.
+    online = lambda item: presence.is_online(item[0].id)
+    age_match = lambda item: age_allowed(me, item[1], True)
+    district_match = lambda item: location_allowed(me, item[1], "district")
+    state_match = lambda item: location_allowed(me, item[1], "state")
+
+    if location_scope == "district":
+        tiers = [
+            ("same district · age matched · online", lambda x: age_match(x) and district_match(x) and online(x)),
+            ("same state · age matched · online", lambda x: age_match(x) and state_match(x) and online(x)),
+            ("anywhere · age matched · online", lambda x: age_match(x) and online(x)),
+            ("anywhere · any age · online", lambda x: online(x)),
+            ("anywhere · any age", lambda x: True),
+        ]
+    elif location_scope == "state":
+        tiers = [
+            ("same state · age matched · online", lambda x: age_match(x) and state_match(x) and online(x)),
+            ("anywhere · age matched · online", lambda x: age_match(x) and online(x)),
+            ("anywhere · any age · online", lambda x: online(x)),
+            ("anywhere · any age", lambda x: True),
+        ]
+    else:
+        tiers = [
+            ("anywhere · age matched · online", lambda x: age_match(x) and online(x)),
+            ("anywhere · any age · online", lambda x: online(x)),
+            ("anywhere · any age", lambda x: True),
+        ]
 
     target = profile_payload(me)
-    scored = score_matches(target, candidates)
-    # Online-first remains a ranking rule, but offline profiles remain available.
-    return sorted(scored, key=lambda c: (not c.get("is_online"), -c.get("score", 0)))
-
+    for tier_name, predicate in tiers:
+        tier = [item for item in candidates if predicate(item)]
+        if tier:
+            scored = score_matches(target, [item[2] for item in tier])
+            for candidate in scored:
+                candidate["match_tier"] = tier_name
+            return sorted(scored, key=lambda c: -c.get("score", 0))
+    return []
 
 
 @app.get("/discover/next")
-def discover_next(gender: str = "any", user: User = Depends(current_user), db: Session = Depends(get_db)):
+def discover_next(gender: str = "any", location: str = "district", user: User = Depends(current_user), db: Session = Depends(get_db)):
     if gender not in PREFERRED_GENDERS:
         raise HTTPException(422, "Invalid session gender preference.")
+    if location not in {"district", "state", "anywhere"}:
+        raise HTTPException(422, "Invalid session location preference.")
     profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
     if not profile or profile.age is None:
         raise HTTPException(409, "Complete your 18+ age before matching.")
-    items = ranked(user, db, gender)
+    items = ranked(user, db, gender, location)
     return {
         "found": bool(items),
         "person": items[0] if items else None,
-        "message": None if items else "No one is available in your current age/gender window. Try Anyone or come back later."
+        "message": None if items else "No one is available right now. Please try again soon."
     }
 
 @app.post("/discover/{candidate_id}/skip")
