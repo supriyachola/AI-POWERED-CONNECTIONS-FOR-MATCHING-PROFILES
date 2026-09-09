@@ -35,7 +35,9 @@ def score_matches(target, candidates):
         interest_score = len(shared) / len(union) if union else 0.0
         vibe_score = 1.0 if target.get("vibe") and target.get("vibe") == candidate.get("vibe") else 0.0
         location_score = 0.0
-        if target.get("country") and target.get("country") == candidate.get("country"):
+        if target.get("district") and target.get("district") == candidate.get("district"):
+            location_score += 1.0
+        elif target.get("country") and target.get("country") == candidate.get("country"):
             location_score += 0.5
         if target.get("state") and target.get("state") == candidate.get("state") and target.get("country") == candidate.get("country"):
             location_score += 0.5
@@ -48,6 +50,8 @@ def score_matches(target, candidates):
             explanation = f"You both like {', '.join(shared[:4])}."
         elif vibe_score:
             explanation = f"You share a {candidate.get('vibe')} vibe."
+        elif target.get("district") and target.get("district") == candidate.get("district"):
+            explanation = "You appear to be in the same district."
         elif location_score >= 1:
             explanation = "You share the same country and state."
         elif float(sim) >= 0.08:
