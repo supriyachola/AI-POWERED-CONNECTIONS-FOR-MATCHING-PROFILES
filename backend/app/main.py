@@ -19,10 +19,46 @@ from .matching import normalize_interests, score_matches
 
 migrate_schema()
 
-app = FastAPI(title="Affinity Plus API", version="0.9.0")
+app = FastAPI(title="Affinity Plus API", version="0.9.1")
 origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173,https://affinityplus.vercel.app").split(",")]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 security = HTTPBearer()
+
+# ---------------- Authentication ----------------
+@app.post("/auth/register")
+def register(data: RegisterRequest, db: Session = Depends(get_db)):
+    username = data.username.strip()
+    if db.scalar(select(User).where(User.username == username)):
+        raise HTTPException(409, "Username already exists")
+    user = User(username=username, password_hash=hash_password(data.password), account_type="registered")
+    db.add(user)
+    db.flush()
+    profile = Profile(user_id=user.id, age=data.age, gender=data.gender)
+    db.add(profile)
+    db.commit()
+    db.refresh(user)
+    presence.touch(user.id)
+    return {"token": create_token(user.id), "user": public_user(user)}
+
+@app.post("/auth/login")
+def login(data: LoginRequest, db: Session = Depends(get_db)):
+    username = data.username.strip()
+    user = db.scalar(select(User).where(User.username == username))
+    if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
+        raise HTTPException(401, "Invalid username or password")
+    presence.touch(user.id)
+    return {"token": create_token(user.id), "user": public_user(user)}
+
+@app.post("/auth/guest")
+def guest_login(db: Session = Depends(get_db)):
+    user = User(username=make_guest_username(db), account_type="guest", guest_token=secrets.token_urlsafe(32))
+    db.add(user)
+    db.flush()
+    db.add(Profile(user_id=user.id, age=None, gender="prefer_not_to_say"))
+    db.commit()
+    db.refresh(user)
+    presence.touch(user.id)
+    return {"token": create_token(user.id), "user": public_user(user)}
 
 # ---------------- Live presence tracking ----------------
 # Lightweight in-memory presence so the frontend can show "X people online"
@@ -216,6 +252,55 @@ def ranked(user, db, session_gender: str = "any", location_scope: str = "distric
             return sorted(scored, key=lambda c: -c.get("score", 0))
     return []
 
+
+@app.get("/me")
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
+    return {**public_user(user), "profile": profile_payload(profile)}
+
+@app.put("/me/profile")
+def update_profile(data: ProfileRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
+    if not profile:
+        profile = Profile(user_id=user.id)
+        db.add(profile)
+    profile.bio = data.bio.strip()
+    profile.looking_for = data.looking_for.strip()
+    profile.interests = json.dumps(normalize_interests(data.interests))
+    if data.age is not None:
+        profile.age = data.age
+    profile.gender = data.gender
+    profile.country = data.country.strip()
+    profile.state = data.state.strip()
+    profile.city = data.city.strip()
+    profile.district = data.district.strip()
+    profile.vibe = data.vibe
+    profile.preferred_gender = data.preferred_gender
+    profile.preferred_country = data.preferred_country.strip()
+    profile.preferred_state = data.preferred_state.strip()
+    profile.min_age = data.min_age
+    profile.max_age = data.max_age
+    db.commit(); db.refresh(profile)
+    return profile_payload(profile)
+
+@app.put("/me/location")
+def update_location(data: LocationRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
+    if not profile:
+        profile = Profile(user_id=user.id)
+        db.add(profile)
+    profile.city = data.city.strip()
+    profile.district = data.district.strip()
+    profile.state = data.state.strip()
+    profile.country = data.country.strip()
+    db.commit(); db.refresh(profile)
+    return profile_payload(profile)
+
+@app.post("/presence/heartbeat")
+def heartbeat(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    presence.touch(user.id)
+    presence.sweep()
+    return {"online_count": presence.online_count()}
 
 @app.get("/discover/next")
 def discover_next(gender: str = "any", location: str = "district", user: User = Depends(current_user), db: Session = Depends(get_db)):
