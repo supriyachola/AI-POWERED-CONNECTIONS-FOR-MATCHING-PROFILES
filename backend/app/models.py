@@ -26,6 +26,7 @@ class Profile(Base):
     country: Mapped[str] = mapped_column(String(80), default="")
     state: Mapped[str] = mapped_column(String(100), default="")
     city: Mapped[str] = mapped_column(String(100), default="")
+    district: Mapped[str] = mapped_column(String(120), default="")
     vibe: Mapped[str] = mapped_column(String(80), default="")
     preferred_gender: Mapped[str] = mapped_column(String(32), default="any")
     preferred_country: Mapped[str] = mapped_column(String(80), default="any")
