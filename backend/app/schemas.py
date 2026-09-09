@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, field_validator
 
 GENDERS = {"male", "female", "non_binary", "prefer_not_to_say"}
 PREFERRED_GENDERS = {"any", "male", "female", "non_binary"}
+VIBES = {"Chill", "Deep talks", "Playful", "Flirty", "Just here to vibe"}
 
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
@@ -29,6 +30,7 @@ class ProfileRequest(BaseModel):
     country: str = Field(default="", max_length=80)
     state: str = Field(default="", max_length=100)
     city: str = Field(default="", max_length=100)
+    district: str = Field(default="", max_length=120)
     vibe: str = Field(default="", max_length=80)
     preferred_gender: str = Field(default="any", max_length=32)
     preferred_country: str = Field(default="any", max_length=80)
@@ -41,6 +43,13 @@ class ProfileRequest(BaseModel):
     def valid_gender(cls, v: str) -> str:
         if v not in GENDERS:
             raise ValueError("Invalid gender")
+        return v
+
+    @field_validator("vibe")
+    @classmethod
+    def valid_vibe(cls, v: str) -> str:
+        if v and v not in VIBES:
+            raise ValueError("Invalid vibe")
         return v
 
     @field_validator("preferred_gender")
@@ -63,6 +72,7 @@ class ConnectionRequest(BaseModel):
 
 class LocationRequest(BaseModel):
     city: str = Field(default="", max_length=100)
+    district: str = Field(default="", max_length=120)
     state: str = Field(default="", max_length=100)
     country: str = Field(default="", max_length=80)
 
