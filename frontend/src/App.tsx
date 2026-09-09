@@ -8,6 +8,7 @@ import {
   Ban,
   Flag,
   MessageCircle,
+  MoreHorizontal,
   RefreshCw,
   SkipForward,
   UserPlus,
@@ -27,6 +28,7 @@ interface ImportMeta {
 
 type Gender = "male" | "female" | "non_binary" | "prefer_not_to_say";
 type SessionGender = "any" | "male" | "female";
+type LocationScope = "district" | "state" | "anywhere";
 
 type Person = {
   user_id: number;
@@ -41,9 +43,11 @@ type Person = {
   country?: string;
   state?: string;
   city?: string;
+  district?: string;
   vibe?: string;
   shared_interests?: string[];
   is_online?: boolean;
+  match_tier?: string;
 };
 
 type Stage = "home" | "finding" | "person" | "call";
@@ -61,6 +65,7 @@ type ChatMessage = {
 
 type LocationData = {
   city: string;
+  district: string;
   state: string;
   country: string;
 };
@@ -94,7 +99,11 @@ function genderLabel(gender?: string) {
 }
 
 function locationLabel(loc: LocationData) {
-  return [loc.city, loc.state, loc.country].filter(Boolean).join(", ");
+  return [loc.district || loc.city, loc.state, loc.country].filter(Boolean).join(", ");
+}
+
+function shortLocationLabel(loc: LocationData) {
+  return [loc.district || loc.city, loc.state].filter(Boolean).join(", ");
 }
 
 async function reverseGeocode(lat: number, lon: number): Promise<LocationData> {
@@ -104,8 +113,13 @@ async function reverseGeocode(lat: number, lon: number): Promise<LocationData> {
   );
   if (!r.ok) throw new Error("Reverse geocoding failed");
   const d = await r.json();
+  const administrative = Array.isArray(d.localityInfo?.administrative) ? d.localityInfo.administrative : [];
+  const districtEntry = administrative.find((item: any) => /district|county/i.test(String(item.description || "")))
+    || administrative.find((item: any) => Number(item.adminLevel) === 6);
+  const district = String(d.suburb || d.neighbourhood || d.district || districtEntry?.name || "");
   return {
-    city: String(d.city || d.locality || d.localityInfo?.administrative?.[2]?.name || ""),
+    city: String(d.city || d.locality || ""),
+    district,
     state: String(d.principalSubdivision || ""),
     country: String(d.countryName || ""),
   };
@@ -117,6 +131,7 @@ async function ipFallback(): Promise<LocationData> {
   const d = await r.json();
   return {
     city: String(d.city || ""),
+    district: String(d.district || d.city || ""),
     state: String(d.region || ""),
     country: String(d.country_name || ""),
   };
@@ -170,6 +185,7 @@ function CallRoom({
   const [error, setError] = useState("");
   const [remoteOnline, setRemoteOnline] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   useEffect(() => {
     const el = chatMessagesRef.current;
@@ -357,29 +373,29 @@ function CallRoom({
           </div>
         </div>
 
-        <div className="call-action-bar" aria-label="Connection actions">
-          <button
-            className="icon-action neutral"
-            onClick={onAddFriend}
-            disabled={friendAdded}
-            title={friendAdded ? "Friend added" : "Add friend"}
-            aria-label={friendAdded ? "Friend added" : "Add friend"}
-          >
-            <UserPlus size={16} />
-            <span>{friendAdded ? "Added" : "Add friend"}</span>
-          </button>
-          <button className="icon-action muted" onClick={onNext} title="Try someone else" aria-label="Try someone else">
-            <SkipForward size={16} />
-            <span>Someone else</span>
-          </button>
-          <button className="icon-action quiet-danger" onClick={onReport} title="Report this person" aria-label="Report this person">
-            <Flag size={15} />
-            <span>Report</span>
-          </button>
-          <button className="icon-action quiet-danger" onClick={onBlock} title="Block this person" aria-label="Block this person">
-            <Ban size={15} />
-            <span>Block</span>
-          </button>
+        <div className="call-topbar-actions">
+          <button className="link-action" onClick={onNext} title="Try someone else">Try someone else →</button>
+          <div className="more-wrap">
+            <button className="more-trigger" onClick={() => setMoreOpen((v) => !v)} aria-expanded={moreOpen} aria-haspopup="menu" title="More actions">
+              <MoreHorizontal size={18} /> <span>More</span>
+            </button>
+            {moreOpen && (
+              <div className="more-menu" role="menu">
+                <button role="menuitem" onClick={() => { onAddFriend(); setMoreOpen(false); }}>
+                  <UserPlus size={15} /> {friendAdded ? "Friend added" : "Add friend"}
+                </button>
+                <button role="menuitem" onClick={() => { onEnd(); setMoreOpen(false); }}>
+                  <RefreshCw size={15} /> Reconnect later
+                </button>
+                <button role="menuitem" onClick={() => { onReport(); setMoreOpen(false); }}>
+                  <Flag size={15} /> Report
+                </button>
+                <button className="danger-item" role="menuitem" onClick={() => { onBlock(); setMoreOpen(false); }}>
+                  <Ban size={15} /> Block
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -488,10 +504,14 @@ export default function App() {
   const [country, setCountry] = useState("");
   const [stateName, setStateName] = useState("");
   const [city, setCity] = useState("");
+  const [district, setDistrict] = useState("");
   const [vibe, setVibe] = useState("");
 
   const [sessionGender, setSessionGender] = useState<SessionGender>(
     (localStorage.getItem("affinity_session_gender") as SessionGender) || "any",
+  );
+  const [locationScope, setLocationScope] = useState<LocationScope>(
+    (localStorage.getItem("affinity_location_scope") as LocationScope) || "district",
   );
   const [locationStatus, setLocationStatus] = useState("Location will be detected automatically.");
   const [manualLocation, setManualLocation] = useState(false);
@@ -530,6 +550,11 @@ export default function App() {
     localStorage.setItem("affinity_session_gender", value);
   }
 
+  function setLocationChoice(value: LocationScope) {
+    setLocationScope(value);
+    localStorage.setItem("affinity_location_scope", value);
+  }
+
   async function auth(e: FormEvent) {
     e.preventDefault();
     setMessage("");
@@ -565,6 +590,7 @@ export default function App() {
     try {
       const loc = await detectLocation();
       setCity(loc.city);
+      setDistrict(loc.district);
       setStateName(loc.state);
       setCountry(loc.country);
       await api("/me/location", { method: "PUT", body: JSON.stringify(loc) });
@@ -594,7 +620,9 @@ export default function App() {
       setCountry(p.country || "");
       setStateName(p.state || "");
       setCity(p.city || "");
-      setVibe(p.vibe || "");
+      setDistrict(p.district || p.city || "");
+      const allowedVibes = ["Chill", "Deep talks", "Playful", "Flirty", "Just here to vibe"];
+      setVibe(allowedVibes.includes(p.vibe) ? p.vibe : "");
 
       const needsAge = !p.age;
       const needsLocation = !p.city || !p.country;
@@ -603,7 +631,7 @@ export default function App() {
       if (needsLocation) {
         await detectAndSaveLocation();
       } else {
-        setLocationStatus(`Detected: ${[p.city, p.state, p.country].filter(Boolean).join(", ")}`);
+        setLocationStatus(`Detected: ${[p.district || p.city, p.state, p.country].filter(Boolean).join(", ")}`);
       }
     } catch {
       logout();
@@ -655,6 +683,7 @@ export default function App() {
       country,
       state: stateName,
       city,
+      district,
       vibe,
       preferred_gender: "any",
       preferred_country: "any",
@@ -714,7 +743,7 @@ export default function App() {
       // so "Who do you want to connect with today?" is always per-session.
       await saveProfile(false, false);
       await new Promise((r) => setTimeout(r, 250));
-      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}`);
+      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&location=${encodeURIComponent(locationScope)}`);
       if (!d.found) {
         setStage("home");
         setMessage(d.message);
@@ -737,7 +766,7 @@ export default function App() {
 
     try {
       await api(`/discover/${person.user_id}/skip`, { method: "POST" });
-      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}`);
+      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&location=${encodeURIComponent(locationScope)}`);
       if (!d.found) {
         setPerson(null);
         setStage("home");
@@ -758,7 +787,7 @@ export default function App() {
     setFriendAdded(false);
     setMessage("");
     try {
-      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}`);
+      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&location=${encodeURIComponent(locationScope)}`);
       if (!d.found) {
         setPerson(null);
         setStage("home");
@@ -824,6 +853,7 @@ export default function App() {
       country: record.country,
       state: record.state,
       city: record.city,
+      district: record.district,
       vibe: record.vibe,
       is_online: record.is_online,
     });
@@ -869,6 +899,7 @@ export default function App() {
         country: h.country,
         state: h.state,
         city: h.city,
+        district: h.district,
         vibe: h.vibe,
         is_online: true,
       });
@@ -943,7 +974,24 @@ export default function App() {
     localStorage.removeItem("account_type");
   }
 
-  const personLocation = person ? [person.city, person.state, person.country].filter(Boolean).join(", ") : "";
+  useEffect(() => {
+    if (stage !== "person" || !person) return;
+    let seconds = 3;
+    setAutoConnectIn(seconds);
+    const id = window.setInterval(() => {
+      seconds -= 1;
+      if (seconds <= 0) {
+        window.clearInterval(id);
+        setAutoConnectIn(null);
+        void connect();
+      } else {
+        setAutoConnectIn(seconds);
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [stage, person?.user_id]);
+
+  const personLocation = person ? [person.district || person.city, person.state, person.country].filter(Boolean).join(", ") : "";
   const ownAgeBracket = ageBracket(age ? Number(age) : null);
 
   if (!token) {
@@ -991,9 +1039,9 @@ export default function App() {
                 </div>
               </div>
               <div className="detected-location-note">
-                <span><UserRound size={15} /> City</span>
-                <strong>Detected automatically after sign-in</strong>
-                <small>No city typing or location dropdowns.</small>
+                <span><UserRound size={15} /> Location</span>
+                <strong>District + city detected automatically after sign-in</strong>
+                <small>No location dropdowns. You can correct it later in Edit profile.</small>
               </div>
             </>
           )}
@@ -1052,7 +1100,7 @@ export default function App() {
           <div className="location-detected-card">
             <div>
               <span className="eyebrow">AUTO-DETECTED</span>
-              <strong>{locationLabel({ city, state: stateName, country }) || "Location unavailable"}</strong>
+              <strong>{locationLabel({ city, district, state: stateName, country }) || "Location unavailable"}</strong>
               <small>{locationStatus}</small>
             </div>
             <button type="button" className="mini-action" onClick={() => setLocationEditOpen((v) => !v)}>
@@ -1063,6 +1111,7 @@ export default function App() {
           {locationEditOpen && (
             <div className="location-override">
               <small>Manual override is available if automatic location is wrong or unavailable.</small>
+              <input value={district} onChange={(e) => setDistrict(e.target.value)} placeholder="District / neighborhood" />
               <input value={city} onChange={(e) => setCity(e.target.value)} placeholder="City" />
               <input value={stateName} onChange={(e) => setStateName(e.target.value)} placeholder="State / region" />
               <input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" />
@@ -1071,18 +1120,12 @@ export default function App() {
           )}
 
           <label>YOUR VIBE <span className="optional">OPTIONAL</span></label>
-          <select value={vibe} onChange={(e) => setVibe(e.target.value)}>
-            <option value="">Choose a vibe</option>
-            <option>Chill</option>
-            <option>Funny</option>
-            <option>Curious</option>
-            <option>Adventurous</option>
-            <option>Creative</option>
-            <option>Deep talker</option>
-            <option>Competitive</option>
-            <option>Social</option>
-            <option>Introvert-friendly</option>
-          </select>
+          <div className="vibe-chips">
+            {["Chill 🌙", "Deep talks 💭", "Playful 😄", "Flirty 😉", "Just here to vibe 🎧"].map((label) => {
+              const value = label.replace(/ [^ ]+$/, "");
+              return <button type="button" key={label} className={vibe === value ? "selected" : ""} onClick={() => setVibe(vibe === value ? "" : value)}>{label}</button>;
+            })}
+          </div>
 
           <label>ABOUT YOU <span className="optional">OPTIONAL</span></label>
           <textarea value={bio} onChange={(e) => setBio(e.target.value)} placeholder="I love travelling, gaming, music…" />
@@ -1120,7 +1163,7 @@ export default function App() {
                     <span className="mini-avatar">{c.username[0].toUpperCase()}</span>
                     <span className="connection-copy">
                       <strong>{c.username}</strong>
-                      <small>{[c.age && `${c.age}y`, genderLabel(c.gender), c.city || c.state || c.country, c.vibe].filter(Boolean).join(" · ")}</small>
+                      <small>{[c.age && `${c.age}y`, genderLabel(c.gender), c.district || c.city || c.state || c.country, c.vibe].filter(Boolean).join(" · ")}</small>
                     </span>
                     <button className="mini-action" onClick={() => joinConnection(c)}><Video size={13} /> Open</button>
                     <button className="mini-action danger" onClick={() => blockPerson(c.user_id)}><Ban size={13} /> Block</button>
@@ -1192,9 +1235,21 @@ export default function App() {
               </div>
             </div>
 
+            <div className="location-picker">
+              <div className="session-picker-head">
+                <span>WHERE SHOULD WE START?</span>
+                <small>We'll widen automatically if the nearby pool is quiet.</small>
+              </div>
+              <div className="session-options location-options">
+                <button className={locationScope === "district" ? "selected" : ""} onClick={() => setLocationChoice("district")}>Near me <span>District</span></button>
+                <button className={locationScope === "state" ? "selected" : ""} onClick={() => setLocationChoice("state")}>Around me <span>State</span></button>
+                <button className={locationScope === "anywhere" ? "selected" : ""} onClick={() => setLocationChoice("anywhere")}>Anywhere <span>Global</span></button>
+              </div>
+            </div>
+
             <div className="home-context">
               <span>AGE GROUP <b>{ownAgeBracket}</b></span>
-              <span>LOCATION <b>{[city, stateName, country].filter(Boolean).join(", ") || "Auto-detecting…"}</b></span>
+              <span>LOCATION <b>{[district || city, stateName, country].filter(Boolean).join(", ") || "Auto-detecting…"}</b></span>
               <span>18+ <b>Rolling age match</b></span>
             </div>
 
@@ -1237,19 +1292,19 @@ export default function App() {
               </div>
               <p className="bio">{person.bio || "This person has not added a bio yet."}</p>
               <div className="chips">{person.interests.map((i) => <span key={i}>{i}</span>)}</div>
-              <div className="why-box">
-                <div className="eyebrow">WHY YOU MIGHT CLICK</div>
-                <p>{person.explanation}</p>
+              <div className="match-reason">
+                <span>{person.explanation}</span>
                 {(person.shared_interests ?? []).length > 0 && <small>Shared: {(person.shared_interests ?? []).join(", ")}</small>}
+                {person.match_tier && <small className="tier-note">Matched via {person.match_tier}.</small>}
               </div>
               <div className="looking">Looking for: {person.looking_for || "a good conversation"}</div>
 
               <div className="auto-connect-row">
                 <div className="auto-connect-status">
                   <span className="auto-connect-ring">{autoConnectIn ?? 3}</span>
-                  <span>Connecting you with {person.username} in {autoConnectIn ?? 3}s…</span>
+                  <span>Connecting in {autoConnectIn ?? 3}s…</span>
                 </div>
-                <button className="skip-button" onClick={next}>Not now, skip →</button>
+                <button className="skip-button" onClick={next}>Not now</button>
               </div>
             </div>
           </div>
@@ -1276,7 +1331,7 @@ export default function App() {
           <form className="onboarding-modal" onSubmit={finishOnboarding}>
             <div className="eyebrow">QUICK SETUP · 18+</div>
             <h2>Just the essentials.</h2>
-            <p>We only need your age and gender to start matching. Your city is detected automatically.</p>
+            <p>We only need your age and gender to start matching. Your district and city are detected automatically.</p>
 
             <div className="onboarding-two-col">
               <div>
@@ -1297,8 +1352,8 @@ export default function App() {
             <div className="onboarding-location">
               <div className="location-icon"><UserRound size={18} /></div>
               <div>
-                <strong>City</strong>
-                <span>{locationLabel({ city, state: stateName, country }) || "Detecting…"}</span>
+                <strong>District</strong>
+                <span>{shortLocationLabel({ city, district, state: stateName, country }) || "Detecting…"}</span>
                 <small>{locationStatus}</small>
               </div>
               <button type="button" className="ghost small" onClick={detectAndSaveLocation}>Detect</button>
@@ -1307,6 +1362,7 @@ export default function App() {
             {manualLocation && (
               <div className="location-override onboarding-override">
                 <small>Last resort: enter your location manually.</small>
+                <input value={district} onChange={(e) => setDistrict(e.target.value)} placeholder="District / neighborhood" />
                 <input value={city} onChange={(e) => setCity(e.target.value)} placeholder="City" />
                 <input value={stateName} onChange={(e) => setStateName(e.target.value)} placeholder="State / region" />
                 <input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" />
