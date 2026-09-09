@@ -31,4 +31,3 @@ def decode_token(token: str) -> int:
             detail="Invalid or expired token",
         )
 
-
