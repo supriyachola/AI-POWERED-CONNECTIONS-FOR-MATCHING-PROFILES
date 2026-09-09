@@ -207,3 +207,64 @@ header{flex-wrap:wrap;height:auto;min-height:74px;gap:8px;padding:12px 5vw}
   .icon-action span{display:none}
   .icon-action{flex:0 0 40px;justify-content:center;padding:9px}
 }
+
+
+/* ---------------- Affinity Plus Social V6: granular location + calmer UX ---------------- */
+.location-picker{width:min(720px,100%);margin:10px 0 4px;padding:2px 0;text-align:left}
+.location-picker .session-picker-head{margin-bottom:8px}
+.location-options button{min-height:50px;border-radius:999px;background:transparent}
+.location-options button span{display:block;font-size:9px;color:#686a78;font-weight:700;margin:3px 0 0}
+.location-options button.selected span{color:#bdb4ff}
+.session-picker{border:0;background:transparent;box-shadow:none;padding:8px 0;margin:16px 0 2px}
+.session-picker .session-options{gap:7px}
+.session-options button{border-radius:999px;min-height:48px;background:#12131a}
+.home-context{margin-top:12px}
+.home-context span{border:0;background:transparent;padding:5px 8px;color:#555764}
+.home-context b{color:#989aa8}
+.person-card{padding:34px 30px}
+.profile-meta span{border:0;background:#171821;padding:7px 9px}
+.match-reason{margin:22px auto 0;max-width:530px;text-align:left;padding:4px 0}
+.match-reason .eyebrow{margin-bottom:7px}
+.match-reason span{display:block;color:#bfc0c9;line-height:1.55;font-size:13px}
+.match-reason small{display:block;color:#777988;font-size:10px;line-height:1.45;margin-top:7px}
+.match-reason .tier-note{color:#5f6170}
+.auto-connect-row{margin-top:22px;gap:8px}
+.auto-connect-status{padding:0;background:transparent;border:0;max-width:none;width:auto;gap:9px}
+.auto-connect-ring{width:30px;height:30px;font-size:13px}
+.auto-connect-status span:last-child{color:#777988;font-size:11px}
+.auto-connect-row .skip-button{border:0;background:transparent;padding:5px;color:#737583;text-decoration:underline;text-underline-offset:3px}
+.call-topbar-actions{position:relative;min-height:38px}
+.more-wrap{position:relative}
+.more-trigger{display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;color:#777988;padding:6px 3px;font-size:12px;font-weight:700;cursor:pointer}
+.more-trigger:hover{color:#c7c5d2}
+.more-menu{position:absolute;right:0;top:calc(100% + 8px);z-index:40;width:190px;padding:6px;border:1px solid #2e2f3a;border-radius:14px;background:#12131a;box-shadow:0 18px 60px #000a}
+.more-menu button{display:flex;align-items:center;gap:9px;width:100%;border:0;border-radius:9px;background:transparent;color:#b6b7c1;padding:10px;font-size:11px;font-weight:700;text-align:left;cursor:pointer}
+.more-menu button:hover{background:#1b1c26;color:#eee}
+.more-menu .danger-item{color:#9b7784}
+.more-menu .danger-item:hover{color:#d8a3b2}
+.vibe-chips{display:flex;flex-wrap:wrap;gap:7px;margin:7px 0 14px}
+.vibe-chips button{border:1px solid #2d2f3a;background:#171821;color:#8f91a0;border-radius:999px;padding:9px 11px;font-size:11px;font-weight:800;cursor:pointer;transition:.15s}
+.vibe-chips button:hover{border-color:#4a4362;color:#c9c4dc}
+.vibe-chips button.selected{background:#292242;border-color:#665b96;color:#e3defe;box-shadow:inset 0 0 0 1px #8d7bd244}
+.profile-drawer .location-detected-card{background:transparent;border:0;padding:8px 0;margin:3px 0 8px}
+.profile-drawer .location-detected-card strong{font-size:13px;color:#ddd}
+.profile-drawer .location-detected-card small{max-width:300px}
+.profile-drawer .location-override{background:transparent}
+.location-icon{background:#1c1a2a}
+@media(max-width:680px){
+  .session-picker,.location-picker{width:100%}
+  .session-options{grid-template-columns:repeat(3,1fr)}
+  .location-options button{padding:8px 7px;font-size:11px}
+  .more-menu{right:-4px}
+  .call-topbar-actions{width:auto!important;justify-content:flex-end!important;align-self:flex-end}
+}
+@media(max-width:520px){
+  .session-options{grid-template-columns:1fr 1fr 1fr}
+  .session-options button span{font-size:10px}
+  .location-options button span{display:none}
+  .person-card{padding:26px 17px}
+}
+@media(max-width:390px){
+  .session-options{grid-template-columns:1fr}
+  .location-options{grid-template-columns:1fr!important}
+}
