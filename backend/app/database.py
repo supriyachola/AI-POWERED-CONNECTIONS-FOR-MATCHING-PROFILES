@@ -32,6 +32,7 @@ def migrate_schema():
         "country": "VARCHAR(80) DEFAULT ''",
         "state": "VARCHAR(100) DEFAULT ''",
         "city": "VARCHAR(100) DEFAULT ''",
+        "district": "VARCHAR(120) DEFAULT ''",
         "vibe": "VARCHAR(80) DEFAULT ''",
         "preferred_gender": "VARCHAR(32) DEFAULT 'any'",
         "preferred_country": "VARCHAR(80) DEFAULT 'any'",
