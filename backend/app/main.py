@@ -189,7 +189,7 @@ def matches_preference(me: Profile, other: Profile, session_gender: str = "any",
     return gender_allowed(me, other, session_gender) and age_allowed(me, other, strict_age) and location_allowed(me, other, location_scope)
 
 
-def ranked(user, db, session_gender: str = "any", location_scope: str = "district"):
+def ranked(user, db, session_gender: str = "any", location_scope: str = "district", state_filter: str = ""):
     me = db.scalar(select(Profile).where(Profile.user_id == user.id))
     if not me or me.age is None:
         return []
@@ -209,6 +209,8 @@ def ranked(user, db, session_gender: str = "any", location_scope: str = "distric
     for p in db.scalars(select(Profile).where(Profile.user_id != user.id)).all():
         if p.user_id in excluded or not gender_allowed(me, p, session_gender):
             continue
+        if state_filter and (not p.state or p.state.casefold() != state_filter.casefold() or not p.country or p.country.casefold() != "india"):
+            continue
         other = db.get(User, p.user_id)
         if other:
             candidates.append((other, p, public_person(other, p)))
@@ -226,20 +228,20 @@ def ranked(user, db, session_gender: str = "any", location_scope: str = "distric
             ("same state · age matched · online", lambda x: age_match(x) and state_match(x) and online(x)),
             ("anywhere · age matched · online", lambda x: age_match(x) and online(x)),
             ("anywhere · any age · online", lambda x: online(x)),
-            ("anywhere · any age", lambda x: True),
+            ("anywhere · any age · online", lambda x: online(x)),
         ]
     elif location_scope == "state":
         tiers = [
             ("same state · age matched · online", lambda x: age_match(x) and state_match(x) and online(x)),
             ("anywhere · age matched · online", lambda x: age_match(x) and online(x)),
             ("anywhere · any age · online", lambda x: online(x)),
-            ("anywhere · any age", lambda x: True),
+            ("anywhere · any age · online", lambda x: online(x)),
         ]
     else:
         tiers = [
             ("anywhere · age matched · online", lambda x: age_match(x) and online(x)),
             ("anywhere · any age · online", lambda x: online(x)),
-            ("anywhere · any age", lambda x: True),
+            ("anywhere · any age · online", lambda x: online(x)),
         ]
 
     target = profile_payload(me)
@@ -303,15 +305,15 @@ def heartbeat(user: User = Depends(current_user), db: Session = Depends(get_db))
     return {"online_count": presence.online_count()}
 
 @app.get("/discover/next")
-def discover_next(gender: str = "any", location: str = "district", user: User = Depends(current_user), db: Session = Depends(get_db)):
+def discover_next(gender: str = "any", state: str = "", user: User = Depends(current_user), db: Session = Depends(get_db)):
     if gender not in PREFERRED_GENDERS:
         raise HTTPException(422, "Invalid session gender preference.")
-    if location not in {"district", "state", "anywhere"}:
-        raise HTTPException(422, "Invalid session location preference.")
+    if state and state not in INDIA_STATES:
+        raise HTTPException(422, "Invalid India state filter.")
     profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
     if not profile or profile.age is None:
         raise HTTPException(409, "Complete your 18+ age before matching.")
-    items = ranked(user, db, gender, location)
+    items = ranked(user, db, gender, "district", state)
     return {
         "found": bool(items),
         "person": items[0] if items else None,
@@ -336,6 +338,11 @@ def connect(data: ConnectionRequest, user: User = Depends(current_user), db: Ses
     each other's friends list without choosing to.
     """
     if data.receiver_id == user.id or not db.get(User, data.receiver_id): raise HTTPException(404, "Person not found")
+    # A call can only be started while the other person is currently online.
+    # Discovery is online-first and this second check prevents a stale result from opening an offline call.
+    presence.sweep()
+    if not presence.is_online(data.receiver_id):
+        raise HTTPException(409, "This person is no longer online. Find another match.")
     if is_blocked(db, user.id, data.receiver_id): raise HTTPException(403, "You cannot connect with a blocked person.")
     existing = db.scalar(select(Connection).where(or_(and_(Connection.requester_id == user.id, Connection.receiver_id == data.receiver_id), and_(Connection.requester_id == data.receiver_id, Connection.receiver_id == user.id))))
     if existing:
