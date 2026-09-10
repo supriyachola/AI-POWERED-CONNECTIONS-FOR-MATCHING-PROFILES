@@ -4,6 +4,8 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import EmojiPicker from "emoji-picker-react";
+
 import {
   Ban,
   Flag,
@@ -28,7 +30,6 @@ interface ImportMeta {
 
 type Gender = "male" | "female" | "non_binary" | "prefer_not_to_say";
 type SessionGender = "any" | "male" | "female";
-type LocationScope = "district" | "state" | "anywhere";
 
 type Person = {
   user_id: number;
@@ -83,7 +84,7 @@ type CallRoomProps = {
   friendAdded: boolean;
 };
 
-const EMOJI_PICK = ["😀", "😂", "😍", "😉", "👋", "👍", "🔥", "❤️", "😅", "🎉", "🤔", "😴"];
+const INDIA_STATES = ["Auto-detect", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", "Andaman and Nicobar Islands", "Chandigarh", "Dadra and Nagar Haveli and Daman and Diu", "Delhi", "Jammu and Kashmir", "Ladakh", "Lakshadweep", "Puducherry"];
 
 function ageBracket(age?: number | null) {
   if (!age) return "18+";
@@ -450,10 +451,15 @@ function CallRoom({
             ))}
           </div>
           {emojiOpen && (
-            <div className="emoji-picker">
-              {EMOJI_PICK.map((em) => (
-                <button type="button" key={em} onClick={() => addEmoji(em)}>{em}</button>
-              ))}
+            <div className="emoji-picker-native" role="dialog" aria-label="Emoji picker">
+              <EmojiPicker
+                onEmojiClick={(emojiData) => addEmoji(emojiData.emoji)}
+                theme="dark"
+                width="100%"
+                height={360}
+                lazyLoadEmojis
+                previewConfig={{ showPreview: false }}
+              />
             </div>
           )}
           <form className="chat-form" onSubmit={sendChat}>
@@ -479,7 +485,7 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
-  const [drawerTab, setDrawerTab] = useState<"friends" | "history" | "blocked">("friends");
+  const [socialPanel, setSocialPanel] = useState<"friends" | "history" | "blocked">("friends");
   const [connections, setConnections] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
   const [blocked, setBlocked] = useState<any[]>([]);
@@ -510,9 +516,7 @@ export default function App() {
   const [sessionGender, setSessionGender] = useState<SessionGender>(
     (localStorage.getItem("affinity_session_gender") as SessionGender) || "any",
   );
-  const [locationScope, setLocationScope] = useState<LocationScope>(
-    (localStorage.getItem("affinity_location_scope") as LocationScope) || "district",
-  );
+  const [stateFilter, setStateFilter] = useState(localStorage.getItem("affinity_state_filter") || "Auto-detect");
   const [locationStatus, setLocationStatus] = useState("Location will be detected automatically.");
   const [manualLocation, setManualLocation] = useState(false);
   const [locationEditOpen, setLocationEditOpen] = useState(false);
@@ -550,9 +554,15 @@ export default function App() {
     localStorage.setItem("affinity_session_gender", value);
   }
 
-  function setLocationChoice(value: LocationScope) {
-    setLocationScope(value);
-    localStorage.setItem("affinity_location_scope", value);
+  function setStateFilterChoice(value: string) {
+    setStateFilter(value);
+    localStorage.setItem("affinity_state_filter", value);
+  }
+
+  function openSocial(panel: "friends" | "history" | "blocked") {
+    setSocialPanel(panel);
+    setConnectionsOpen(true);
+    refreshSocialData();
   }
 
   async function auth(e: FormEvent) {
@@ -743,7 +753,7 @@ export default function App() {
       // so "Who do you want to connect with today?" is always per-session.
       await saveProfile(false, false);
       await new Promise((r) => setTimeout(r, 250));
-      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&location=${encodeURIComponent(locationScope)}`);
+      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&state=${encodeURIComponent(stateFilter === "Auto-detect" ? "" : stateFilter)}`);
       if (!d.found) {
         setStage("home");
         setMessage(d.message);
@@ -766,7 +776,7 @@ export default function App() {
 
     try {
       await api(`/discover/${person.user_id}/skip`, { method: "POST" });
-      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&location=${encodeURIComponent(locationScope)}`);
+      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&state=${encodeURIComponent(stateFilter === "Auto-detect" ? "" : stateFilter)}`);
       if (!d.found) {
         setPerson(null);
         setStage("home");
@@ -787,7 +797,7 @@ export default function App() {
     setFriendAdded(false);
     setMessage("");
     try {
-      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&location=${encodeURIComponent(locationScope)}`);
+      const d = await api(`/discover/next?gender=${encodeURIComponent(sessionGender)}&state=${encodeURIComponent(stateFilter === "Auto-detect" ? "" : stateFilter)}`);
       if (!d.found) {
         setPerson(null);
         setStage("home");
@@ -1069,9 +1079,9 @@ export default function App() {
         <div className="header-actions">
           {accountType === "guest" && <span className="guest-badge">👤 GUEST</span>}
           {onlineCount !== null && <span className="header-online"><span className="pulse-dot" /> {onlineCount} online</span>}
-          <button className="ghost small" onClick={() => { setConnectionsOpen((v) => !v); refreshSocialData(); }}>
-            Friends {connections.length ? `(${connections.length})` : ""}
-          </button>
+          <button className="ghost small" onClick={() => openSocial("friends")}>Friends {connections.length ? `(${connections.length})` : ""}</button>
+          <button className="ghost small" onClick={() => openSocial("history")}>History</button>
+          <button className="ghost small" onClick={() => openSocial("blocked")}>Blocked</button>
           <button className="ghost small" onClick={() => setProfileOpen((v) => !v)}>
             {profileOpen ? "Close profile" : "Edit profile"}
           </button>
@@ -1144,17 +1154,11 @@ export default function App() {
         <section className="connections-drawer">
           <div className="eyebrow">YOUR SOCIAL SPACE</div>
           <div className="connections-title-row">
-            <h2>{drawerTab === "friends" ? "Friends" : drawerTab === "history" ? "History" : "Blocked"}</h2>
+            <h2>{socialPanel === "friends" ? "Friends" : socialPanel === "history" ? "History" : "Blocked"}</h2>
             <button className="drawer-close" onClick={() => setConnectionsOpen(false)}>×</button>
           </div>
 
-          <div className="drawer-tabs">
-            <button className={drawerTab === "friends" ? "active" : ""} onClick={() => setDrawerTab("friends")}>Friends</button>
-            <button className={drawerTab === "history" ? "active" : ""} onClick={() => setDrawerTab("history")}>History</button>
-            <button className={drawerTab === "blocked" ? "active" : ""} onClick={() => setDrawerTab("blocked")}>Blocked</button>
-          </div>
-
-          {drawerTab === "friends" && (
+          {socialPanel === "friends" && (
             connections.length === 0
               ? <div className="connections-empty">No friends yet. Start a call and tap <b>＋ Add friend</b> if you want to keep the connection.</div>
               : <div className="connection-list">
@@ -1177,7 +1181,7 @@ export default function App() {
               </div>
           )}
 
-          {drawerTab === "history" && (
+          {socialPanel === "history" && (
             history.length === 0
               ? <div className="connections-empty">Only people you have actually called appear here. Skips and reports stay out of History.</div>
               : <div className="connection-list">
@@ -1200,7 +1204,7 @@ export default function App() {
               </div>
           )}
 
-          {drawerTab === "blocked" && (
+          {socialPanel === "blocked" && (
             blocked.length === 0
               ? <div className="connections-empty">No blocked users.</div>
               : <div className="connection-list">
@@ -1235,16 +1239,22 @@ export default function App() {
               </div>
             </div>
 
-            <div className="location-picker">
+            <div className="location-summary">
               <div className="session-picker-head">
-                <span>WHERE SHOULD WE START?</span>
-                <small>We'll widen automatically if the nearby pool is quiet.</small>
+                <span>LOCATION</span>
+                <small>Detected automatically. Matching starts nearby, then widens if needed.</small>
               </div>
-              <div className="session-options location-options">
-                <button className={locationScope === "district" ? "selected" : ""} onClick={() => setLocationChoice("district")}>Near me <span>District</span></button>
-                <button className={locationScope === "state" ? "selected" : ""} onClick={() => setLocationChoice("state")}>Around me <span>State</span></button>
-                <button className={locationScope === "anywhere" ? "selected" : ""} onClick={() => setLocationChoice("anywhere")}>Anywhere <span>Global</span></button>
+              <strong>{[district || city, stateName, country].filter(Boolean).join(", ") || "Detecting location…"}</strong>
+            </div>
+
+            <div className="state-filter">
+              <div className="session-picker-head">
+                <span>OPTIONAL STATE FILTER · INDIA</span>
+                <small>Use this only when you want to stay within a particular state.</small>
               </div>
+              <select value={stateFilter} onChange={(e) => setStateFilterChoice(e.target.value)}>
+                {INDIA_STATES.map((state) => <option key={state} value={state}>{state}</option>)}
+              </select>
             </div>
 
             <div className="home-context">
