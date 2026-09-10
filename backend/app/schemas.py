@@ -79,4 +79,3 @@ class LocationRequest(BaseModel):
 class ReportRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=80)
     details: str = Field(default="", max_length=2000)
-
