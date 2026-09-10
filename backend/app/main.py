@@ -3,6 +3,7 @@ import os
 import secrets
 import string
 import time
+from datetime import datetime, timezone
 from typing import Dict
 
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -12,14 +13,14 @@ from sqlalchemy import select, or_, and_, desc
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db, migrate_schema
-from .models import User, Profile, Connection, DiscoveryAction, InteractionHistory, Block, Report
+from .models import User, Profile, Connection, FriendRequest, DiscoveryAction, InteractionHistory, Block, Report
 from .schemas import RegisterRequest, LoginRequest, ProfileRequest, ConnectionRequest, LocationRequest, ReportRequest, PREFERRED_GENDERS
 from .auth import hash_password, verify_password, create_token, decode_token
 from .matching import normalize_interests, score_matches
 
 migrate_schema()
 
-app = FastAPI(title="Affinity Plus API", version="0.9.1")
+app = FastAPI(title="Affinity Plus API", version="0.10.0")
 origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173,https://affinityplus.vercel.app").split(",")]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 security = HTTPBearer()
@@ -204,6 +205,13 @@ def ranked(user, db, session_gender: str = "any", location_scope: str = "distric
         row.receiver_id if row.requester_id == user.id else row.requester_id
         for row in db.scalars(select(Connection).where(or_(Connection.requester_id == user.id, Connection.receiver_id == user.id))).all()
     })
+    excluded.update({
+        row.receiver_id if row.requester_id == user.id else row.requester_id
+        for row in db.scalars(select(FriendRequest).where(
+            FriendRequest.status.in_(["pending", "accepted"]),
+            or_(FriendRequest.requester_id == user.id, FriendRequest.receiver_id == user.id),
+        )).all()
+    })
 
     candidates = []
     for p in db.scalars(select(Profile).where(Profile.user_id != user.id)).all():
@@ -349,44 +357,148 @@ def connect(data: ConnectionRequest, user: User = Depends(current_user), db: Ses
         if existing.status == "blocked": raise HTTPException(403, "This connection is blocked.")
         if existing.status == "removed": existing.status = "calling"
         record_history(db, user.id, data.receiver_id, "call_started", existing.id); db.commit()
-        return {"message": "Reconnected", "status": existing.status, "connection_id": existing.id, "is_friend": existing.status == "connected"}
+        return {"message": "Reconnected", "status": existing.status, "connection_id": existing.id, "is_friend": bool(existing.status == "connected" or accepted_friend_request(db, user.id, data.receiver_id))}
     connection = Connection(requester_id=user.id, receiver_id=data.receiver_id, status="calling")
     db.add(connection); db.flush()
     db.add(DiscoveryAction(user_id=user.id, candidate_id=data.receiver_id, action="connected"))
     record_history(db, user.id, data.receiver_id, "call_started", connection.id); record_history(db, data.receiver_id, user.id, "call_started", connection.id); db.commit()
-    return {"message": "Call started", "status": "calling", "connection_id": connection.id, "is_friend": False}
+    return {"message": "Call started", "status": "calling", "connection_id": connection.id, "is_friend": bool(accepted_friend_request(db, user.id, data.receiver_id))}
 
-@app.post("/connections/{connection_id}/add-friend")
-def add_friend(connection_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def accepted_friend_request(db: Session, a: int, b: int):
+    return db.scalar(select(FriendRequest).where(
+        FriendRequest.status == "accepted",
+        or_(
+            and_(FriendRequest.requester_id == a, FriendRequest.receiver_id == b),
+            and_(FriendRequest.requester_id == b, FriendRequest.receiver_id == a),
+        ),
+    ))
+
+
+def pending_friend_request(db: Session, a: int, b: int):
+    return db.scalar(select(FriendRequest).where(
+        FriendRequest.status == "pending",
+        or_(
+            and_(FriendRequest.requester_id == a, FriendRequest.receiver_id == b),
+            and_(FriendRequest.requester_id == b, FriendRequest.receiver_id == a),
+        ),
+    ))
+
+
+@app.post("/connections/{connection_id}/friend-request")
+def send_friend_request(connection_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     row = db.get(Connection, connection_id)
-    if not row or user.id not in (row.requester_id, row.receiver_id): raise HTTPException(404, "Connection not found")
-    if row.status == "blocked": raise HTTPException(403, "This connection is blocked.")
+    if not row or user.id not in (row.requester_id, row.receiver_id):
+        raise HTTPException(404, "Connection not found")
     other_id = row.receiver_id if row.requester_id == user.id else row.requester_id
-    was_friend = row.status == "connected"
-    row.status = "connected"
-    if not was_friend:
-        record_history(db, user.id, other_id, "friend_added", row.id); record_history(db, other_id, user.id, "friend_added", row.id)
+    if is_blocked(db, user.id, other_id):
+        raise HTTPException(403, "You cannot send a request to a blocked person.")
+    if accepted_friend_request(db, user.id, other_id):
+        return {"status": "accepted", "message": "You are already friends."}
+    existing = pending_friend_request(db, user.id, other_id)
+    if existing:
+        if existing.requester_id == user.id:
+            return {"status": "pending", "message": "Friend request already sent.", "request_id": existing.id}
+        raise HTTPException(409, "This person has already sent you a friend request. Open Requests to accept it.")
+    request = FriendRequest(requester_id=user.id, receiver_id=other_id, status="pending")
+    db.add(request)
+    db.commit(); db.refresh(request)
+    return {"status": "pending", "message": "Friend request sent. They need to accept it.", "request_id": request.id}
+
+
+@app.get("/friend-requests")
+def friend_requests(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(FriendRequest).where(
+        or_(FriendRequest.receiver_id == user.id, FriendRequest.requester_id == user.id),
+        FriendRequest.status == "pending",
+    ).order_by(desc(FriendRequest.created_at))).all()
+    incoming, outgoing = [], []
+    for r in rows:
+        other_id = r.requester_id if r.receiver_id == user.id else r.receiver_id
+        other = db.get(User, other_id)
+        profile = db.scalar(select(Profile).where(Profile.user_id == other_id)) if other else None
+        if not other: continue
+        item = {"request_id": r.id, "user_id": other.id, "username": other.username, "is_online": presence.is_online(other.id), "created_at": r.created_at.isoformat(), **profile_payload(profile)}
+        (incoming if r.receiver_id == user.id else outgoing).append(item)
+    return {"incoming": incoming, "outgoing": outgoing, "incoming_count": len(incoming)}
+
+
+@app.post("/friend-requests/{request_id}/accept")
+def accept_friend_request(request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    request = db.get(FriendRequest, request_id)
+    if not request or request.receiver_id != user.id or request.status != "pending":
+        raise HTTPException(404, "Friend request not found")
+    if is_blocked(db, user.id, request.requester_id):
+        raise HTTPException(403, "Unblock this person before accepting the request.")
+    request.status = "accepted"
+    request.updated_at = datetime.now(timezone.utc)
     db.commit()
-    return {"message": "Added to friends", "status": "connected", "connection_id": row.id}
+    return {"status": "accepted", "message": "Friend request accepted."}
+
+
+@app.post("/friend-requests/{request_id}/reject")
+def reject_friend_request(request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    request = db.get(FriendRequest, request_id)
+    if not request or request.receiver_id != user.id or request.status != "pending":
+        raise HTTPException(404, "Friend request not found")
+    request.status = "rejected"
+    db.commit()
+    return {"status": "rejected"}
+
+
+@app.delete("/friend-requests/{request_id}")
+def cancel_friend_request(request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    request = db.get(FriendRequest, request_id)
+    if not request or request.requester_id != user.id or request.status != "pending":
+        raise HTTPException(404, "Friend request not found")
+    request.status = "cancelled"
+    db.commit()
+    return {"status": "cancelled"}
+
 
 @app.get("/connections")
 def connections(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    result, seen = [], set()
+    # Legacy/explicitly connected records remain compatible. New friendships
+    # come only from an accepted FriendRequest.
     rows = db.scalars(select(Connection).where(or_(Connection.requester_id == user.id, Connection.receiver_id == user.id), Connection.status == "connected").order_by(desc(Connection.updated_at))).all()
-    result = []
     for row in rows:
         other_id = row.receiver_id if row.requester_id == user.id else row.requester_id
-        if is_blocked(db, user.id, other_id): continue
+        if other_id in seen or is_blocked(db, user.id, other_id): continue
         other = db.get(User, other_id); profile = db.scalar(select(Profile).where(Profile.user_id == other_id)) if other else None
-        if other: result.append({"connection_id": row.id, **public_person(other, profile), "status": row.status, "connected_at": row.created_at.isoformat()})
+        if other:
+            seen.add(other_id); result.append({"connection_id": row.id, "friend_request_id": None, **public_person(other, profile), "status": "connected", "connected_at": row.created_at.isoformat()})
+    accepted = db.scalars(select(FriendRequest).where(
+        FriendRequest.status == "accepted",
+        or_(FriendRequest.requester_id == user.id, FriendRequest.receiver_id == user.id),
+    ).order_by(desc(FriendRequest.updated_at))).all()
+    for fr in accepted:
+        other_id = fr.receiver_id if fr.requester_id == user.id else fr.requester_id
+        if other_id in seen or is_blocked(db, user.id, other_id): continue
+        other = db.get(User, other_id); profile = db.scalar(select(Profile).where(Profile.user_id == other_id)) if other else None
+        if other:
+            seen.add(other_id); result.append({"connection_id": None, "friend_request_id": fr.id, **public_person(other, profile), "status": "accepted", "connected_at": fr.updated_at.isoformat()})
     return {"connections": result}
 
 @app.delete("/connections/{connection_id}")
 def remove_connection(connection_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     row = db.get(Connection, connection_id)
-    if not row or user.id not in (row.requester_id, row.receiver_id): raise HTTPException(404, "Connection not found")
-    other_id = row.receiver_id if row.requester_id == user.id else row.requester_id
-    row.status = "removed"; record_history(db, user.id, other_id, "removed", row.id); db.commit()
+    if row and user.id in (row.requester_id, row.receiver_id):
+        other_id = row.receiver_id if row.requester_id == user.id else row.requester_id
+        row.status = "removed"
+        db.commit()
+        return {"status": "removed"}
+    raise HTTPException(404, "Connection not found")
+
+
+@app.delete("/friendships/{friend_request_id}")
+def remove_friendship(friend_request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    request = db.get(FriendRequest, friend_request_id)
+    if not request or user.id not in (request.requester_id, request.receiver_id) or request.status != "accepted":
+        raise HTTPException(404, "Friendship not found")
+    request.status = "removed"
+    db.commit()
     return {"status": "removed"}
+
 
 @app.get("/history")
 def history(limit: int = 50, user: User = Depends(current_user), db: Session = Depends(get_db)):
@@ -412,13 +524,14 @@ def history(limit: int = 50, user: User = Depends(current_user), db: Session = D
         other = db.get(User, row.other_user_id)
         profile = db.scalar(select(Profile).where(Profile.user_id == row.other_user_id)) if other else None
         connection = db.get(Connection, row.connection_id) if row.connection_id else None
-        is_friend = bool(connection and connection.status == "connected")
+        is_friend = bool((connection and connection.status == "connected") or accepted_friend_request(db, user.id, row.other_user_id))
         if other:
             result.append({
                 "id": row.id,
                 "user_id": other.id,
                 "username": other.username,
                 "connection_id": row.connection_id,
+                "friend_request_id": (accepted_friend_request(db, user.id, row.other_user_id).id if accepted_friend_request(db, user.id, row.other_user_id) else None),
                 "created_at": row.created_at.isoformat(),
                 "is_online": presence.is_online(other.id),
                 "is_friend": is_friend,
