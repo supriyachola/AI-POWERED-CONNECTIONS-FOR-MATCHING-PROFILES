@@ -16,6 +16,9 @@ import {
   UserPlus,
   UserRound,
   Video,
+  Check,
+  X,
+  Bell,
 } from "lucide-react";
 
 const API = import.meta.env.VITE_API_URL || "https://affinityplus-api.onrender.com";
@@ -82,6 +85,7 @@ type CallRoomProps = {
   onReport: () => void;
   onBlock: () => void;
   friendAdded: boolean;
+  friendRequestState?: "none" | "pending" | "accepted";
 };
 
 const INDIA_STATES = ["Auto-detect", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", "Andaman and Nicobar Islands", "Chandigarh", "Dadra and Nagar Haveli and Daman and Diu", "Delhi", "Jammu and Kashmir", "Ladakh", "Lakshadweep", "Puducherry"];
@@ -170,6 +174,7 @@ function CallRoom({
   onReport,
   onBlock,
   friendAdded,
+  friendRequestState = "none",
 }: CallRoomProps) {
   const localVideo = useRef<HTMLVideoElement>(null);
   const remoteVideo = useRef<HTMLVideoElement>(null);
@@ -383,7 +388,7 @@ function CallRoom({
             {moreOpen && (
               <div className="more-menu" role="menu">
                 <button role="menuitem" onClick={() => { onAddFriend(); setMoreOpen(false); }}>
-                  <UserPlus size={15} /> {friendAdded ? "Friend added" : "Add friend"}
+                  <UserPlus size={15} /> {friendAdded || friendRequestState === "accepted" ? "Friends" : friendRequestState === "pending" ? "Request sent" : "Add friend"}
                 </button>
                 <button role="menuitem" onClick={() => { onEnd(); setMoreOpen(false); }}>
                   <RefreshCw size={15} /> Reconnect later
@@ -485,8 +490,10 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
-  const [socialPanel, setSocialPanel] = useState<"friends" | "history" | "blocked">("friends");
+  const [socialPanel, setSocialPanel] = useState<"friends" | "requests" | "history" | "blocked">("friends");
   const [connections, setConnections] = useState<any[]>([]);
+  const [incomingRequests, setIncomingRequests] = useState<any[]>([]);
+  const [outgoingRequests, setOutgoingRequests] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
   const [blocked, setBlocked] = useState<any[]>([]);
   const [reportOpen, setReportOpen] = useState(false);
@@ -495,6 +502,7 @@ export default function App() {
   const [onlineCount, setOnlineCount] = useState<number | null>(null);
   const [autoConnectIn, setAutoConnectIn] = useState<number | null>(null);
   const [friendAdded, setFriendAdded] = useState(false);
+  const [friendRequestState, setFriendRequestState] = useState<"none" | "pending" | "accepted">("none");
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -559,7 +567,7 @@ export default function App() {
     localStorage.setItem("affinity_state_filter", value);
   }
 
-  function openSocial(panel: "friends" | "history" | "blocked") {
+  function openSocial(panel: "friends" | "requests" | "history" | "blocked") {
     setSocialPanel(panel);
     setConnectionsOpen(true);
     refreshSocialData();
@@ -654,12 +662,15 @@ export default function App() {
 
   async function refreshSocialData() {
     try {
-      const [f, h, b] = await Promise.all([
+      const [f, r, h, b] = await Promise.all([
         api("/connections"),
+        api("/friend-requests"),
         api("/history?limit=60"),
         api("/blocked"),
       ]);
       setConnections(f.connections || []);
+      setIncomingRequests(r.incoming || []);
+      setOutgoingRequests(r.outgoing || []);
       setHistory(h.history || []);
       setBlocked(b.blocked || []);
     } catch {}
@@ -668,6 +679,13 @@ export default function App() {
   useEffect(() => {
     if (token && currentUserId) refreshSocialData();
   }, [token, currentUserId, stage]);
+
+  // Keep friend-request badges fresh while the user is online.
+  useEffect(() => {
+    if (!token || !currentUserId) return;
+    const id = window.setInterval(() => { void refreshSocialData(); }, 15000);
+    return () => window.clearInterval(id);
+  }, [token, currentUserId]);
 
   useEffect(() => {
     if (!token) return;
@@ -746,6 +764,7 @@ export default function App() {
     setConnectionId(null);
     setMessage("");
     setFriendAdded(false);
+    setFriendRequestState("none");
     setAutoConnectIn(null);
 
     try {
@@ -772,6 +791,7 @@ export default function App() {
     setStage("finding");
     setMessage("");
     setFriendAdded(false);
+    setFriendRequestState("none");
     setAutoConnectIn(null);
 
     try {
@@ -821,6 +841,7 @@ export default function App() {
       });
       setConnectionId(d.connection_id);
       setFriendAdded(Boolean(d.is_friend));
+      setFriendRequestState(Boolean(d.is_friend) ? "accepted" : "none");
       setStage("call");
     } catch (e) {
       setMessage((e as Error).message);
@@ -828,10 +849,11 @@ export default function App() {
   }
 
   async function addFriendFromCall() {
-    if (!connectionId || friendAdded) return;
+    if (!connectionId || friendAdded || friendRequestState === "pending") return;
     try {
-      await api(`/connections/${connectionId}/add-friend`, { method: "POST" });
-      setFriendAdded(true);
+      const d = await api(`/connections/${connectionId}/friend-request`, { method: "POST" });
+      setFriendRequestState(d.status === "accepted" ? "accepted" : "pending");
+      setMessage(d.message || "Friend request sent. They need to accept it.");
       await refreshSocialData();
     } catch (e) {
       setMessage((e as Error).message);
@@ -839,14 +861,41 @@ export default function App() {
   }
 
   async function addFriendFromHistory(h: any) {
-    if (!h.connection_id) return;
+    if (!h.connection_id) {
+      setMessage("Friend request can only be sent from an active call or an existing call connection.");
+      return;
+    }
     try {
-      await api(`/connections/${h.connection_id}/add-friend`, { method: "POST" });
+      const d = await api(`/connections/${h.connection_id}/friend-request`, { method: "POST" });
       await refreshSocialData();
-      setMessage(`${h.username} added to Friends.`);
+      setMessage(d.message || "Friend request sent. They need to accept it.");
     } catch (e) {
       setMessage((e as Error).message);
     }
+  }
+
+  async function acceptRequest(requestId: number) {
+    try {
+      await api(`/friend-requests/${requestId}/accept`, { method: "POST" });
+      await refreshSocialData();
+      setMessage("Friend request accepted.");
+    } catch (e) { setMessage((e as Error).message); }
+  }
+
+  async function rejectRequest(requestId: number) {
+    try {
+      await api(`/friend-requests/${requestId}/reject`, { method: "POST" });
+      await refreshSocialData();
+      setMessage("Friend request declined.");
+    } catch (e) { setMessage((e as Error).message); }
+  }
+
+  async function cancelRequest(requestId: number) {
+    try {
+      await api(`/friend-requests/${requestId}`, { method: "DELETE" });
+      await refreshSocialData();
+      setMessage("Friend request cancelled.");
+    } catch (e) { setMessage((e as Error).message); }
   }
 
   function openPersonFromRecord(record: any, asFriend = false) {
@@ -869,6 +918,7 @@ export default function App() {
     });
     setConnectionId(record.connection_id || null);
     setFriendAdded(asFriend);
+    setFriendRequestState(asFriend ? "accepted" : "none");
     setConnectionsOpen(false);
   }
 
@@ -916,6 +966,7 @@ export default function App() {
       setConnectionId(d.connection_id);
       setConnectionsOpen(false);
       setFriendAdded(Boolean(d.is_friend));
+      setFriendRequestState(Boolean(d.is_friend) ? "accepted" : "none");
       setStage("call");
     } catch (e) {
       setMessage((e as Error).message);
@@ -1080,6 +1131,7 @@ export default function App() {
           {accountType === "guest" && <span className="guest-badge">👤 GUEST</span>}
           {onlineCount !== null && <span className="header-online"><span className="pulse-dot" /> {onlineCount} online</span>}
           <button className="ghost small" onClick={() => openSocial("friends")}>Friends {connections.length ? `(${connections.length})` : ""}</button>
+          <button className="ghost small request-nav" onClick={() => openSocial("requests")}>Requests {incomingRequests.length ? `(${incomingRequests.length})` : ""}<Bell size={13} /></button>
           <button className="ghost small" onClick={() => openSocial("history")}>History</button>
           <button className="ghost small" onClick={() => openSocial("blocked")}>Blocked</button>
           <button className="ghost small" onClick={() => setProfileOpen((v) => !v)}>
@@ -1154,7 +1206,7 @@ export default function App() {
         <section className="connections-drawer">
           <div className="eyebrow">YOUR SOCIAL SPACE</div>
           <div className="connections-title-row">
-            <h2>{socialPanel === "friends" ? "Friends" : socialPanel === "history" ? "History" : "Blocked"}</h2>
+            <h2>{socialPanel === "friends" ? "Friends" : socialPanel === "requests" ? "Friend requests" : socialPanel === "history" ? "History" : "Blocked"}</h2>
             <button className="drawer-close" onClick={() => setConnectionsOpen(false)}>×</button>
           </div>
 
@@ -1175,10 +1227,40 @@ export default function App() {
                       openPersonFromRecord(c, true);
                       setReportOpen(true);
                     }}><Flag size={13} /> Report</button>
-                    <button className="mini-action" onClick={() => removeFriend(c.connection_id)}>Remove</button>
+                    {c.connection_id ? <button className="mini-action" onClick={() => removeFriend(c.connection_id)}>Remove</button> : c.friend_request_id ? <button className="mini-action" onClick={async () => { await api(`/friendships/${c.friend_request_id}`, { method: "DELETE" }); await refreshSocialData(); }}>Remove</button> : null}
                   </div>
                 ))}
               </div>
+          )}
+
+          {socialPanel === "requests" && (
+            <div className="requests-space">
+              <div className="request-section">
+                <div className="request-section-title">Incoming <span>{incomingRequests.length}</span></div>
+                {incomingRequests.length === 0 ? <div className="connections-empty">No new friend requests.</div> : <div className="connection-list">
+                  {incomingRequests.map((r) => (
+                    <div className="connection-item request-item" key={r.request_id}>
+                      <span className="mini-avatar">{r.username[0].toUpperCase()}</span>
+                      <span className="connection-copy"><strong>{r.username}</strong><small>{r.is_online ? "● Online" : "Offline"} · {r.district || r.city || r.state || r.country || "Affinity Plus"}</small></span>
+                      <button className="mini-action accept" onClick={() => acceptRequest(r.request_id)}><Check size={13} /> Accept</button>
+                      <button className="mini-action quiet-danger" onClick={() => rejectRequest(r.request_id)}><X size={13} /> Decline</button>
+                    </div>
+                  ))}
+                </div>}
+              </div>
+              <div className="request-section">
+                <div className="request-section-title">Sent <span>{outgoingRequests.length}</span></div>
+                {outgoingRequests.length === 0 ? <div className="connections-empty">No pending requests sent.</div> : <div className="connection-list">
+                  {outgoingRequests.map((r) => (
+                    <div className="connection-item request-item" key={r.request_id}>
+                      <span className="mini-avatar">{r.username[0].toUpperCase()}</span>
+                      <span className="connection-copy"><strong>{r.username}</strong><small>{r.is_online ? "● Online" : "Offline"} · Waiting for acceptance</small></span>
+                      <button className="mini-action" onClick={() => cancelRequest(r.request_id)}>Cancel</button>
+                    </div>
+                  ))}
+                </div>}
+              </div>
+            </div>
           )}
 
           {socialPanel === "history" && (
@@ -1330,6 +1412,7 @@ export default function App() {
             onNext={nextFromCall}
             onAddFriend={addFriendFromCall}
             friendAdded={friendAdded}
+            friendRequestState={friendRequestState}
             onReport={() => setReportOpen(true)}
             onBlock={() => blockPerson(person.user_id)}
           />
