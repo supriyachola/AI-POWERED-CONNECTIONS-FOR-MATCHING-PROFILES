@@ -58,6 +58,17 @@ class Connection(Base):
     __table_args__ = (UniqueConstraint("requester_id", "receiver_id", name="uq_connection_direction"),)
 
 
+class FriendRequest(Base):
+    __tablename__ = "friend_requests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    requester_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    receiver_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("requester_id", "receiver_id", name="uq_friend_request_direction"),)
+
+
 class InteractionHistory(Base):
     __tablename__ = "interaction_history"
     id: Mapped[int] = mapped_column(primary_key=True)
