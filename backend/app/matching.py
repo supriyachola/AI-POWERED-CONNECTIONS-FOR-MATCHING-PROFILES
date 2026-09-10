@@ -65,4 +65,3 @@ def score_matches(target, candidates):
             "explanation": explanation,
         })
     return sorted(results, key=lambda x: x["score"], reverse=True)
-
