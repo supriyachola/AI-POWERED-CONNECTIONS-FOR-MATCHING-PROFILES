@@ -25,3 +25,4 @@ try:
     db.commit(); print("Seed complete. Demo password for all users: password123")
 finally:
     db.close()
+
