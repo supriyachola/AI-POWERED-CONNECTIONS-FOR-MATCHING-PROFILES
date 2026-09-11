@@ -20,7 +20,7 @@ from .matching import normalize_interests, score_matches
 
 migrate_schema()
 
-app = FastAPI(title="Affinity Plus API", version="0.10.0")
+app = FastAPI(title="Affinity Plus API", version="0.11.0")
 origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173,https://affinityplus.vercel.app").split(",")]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 security = HTTPBearer()
@@ -190,6 +190,30 @@ def matches_preference(me: Profile, other: Profile, session_gender: str = "any",
     return gender_allowed(me, other, session_gender) and age_allowed(me, other, strict_age) and location_allowed(me, other, location_scope)
 
 
+CALL_ACTIVE_STATUSES = {"reserved", "calling", "active"}
+CALL_RESERVATION_TIMEOUT_SECONDS = 20
+
+def cleanup_stale_calls(db: Session) -> None:
+    """Release abandoned discovery/call reservations so users never get stuck."""
+    cutoff = datetime.now(timezone.utc).timestamp() - CALL_RESERVATION_TIMEOUT_SECONDS
+    rows = db.scalars(select(Connection).where(Connection.status.in_(["reserved", "calling"]))).all()
+    changed = False
+    for row in rows:
+        created = row.updated_at or row.created_at
+        if created and created.timestamp() < cutoff:
+            row.status = "ended"
+            changed = True
+    if changed:
+        db.flush()
+
+def active_call_for_user(db: Session, user_id: int):
+    """Return the one active call/reservation belonging to a user, if any."""
+    return db.scalar(select(Connection).where(
+        Connection.status.in_(CALL_ACTIVE_STATUSES),
+        or_(Connection.requester_id == user_id, Connection.receiver_id == user_id),
+    ).order_by(desc(Connection.updated_at)))
+
+
 def ranked(user, db, session_gender: str = "any", location_scope: str = "district", state_filter: str = ""):
     me = db.scalar(select(Profile).where(Profile.user_id == user.id))
     if not me or me.age is None:
@@ -201,9 +225,18 @@ def ranked(user, db, session_gender: str = "any", location_scope: str = "distric
     excluded.update({x.blocked_user_id for x in db.scalars(select(Block).where(Block.user_id == user.id)).all()})
     excluded.update({x.user_id for x in db.scalars(select(Block).where(Block.blocked_user_id == user.id)).all()})
     excluded.add(user.id)
+    cleanup_stale_calls(db)
+    active_rows = db.scalars(select(Connection).where(Connection.status.in_(CALL_ACTIVE_STATUSES))).all()
+    # A person can participate in exactly one discovery reservation/call at a time.
+    for row in active_rows:
+        if row.requester_id != user.id:
+            excluded.add(row.requester_id)
+        if row.receiver_id != user.id:
+            excluded.add(row.receiver_id)
     excluded.update({
         row.receiver_id if row.requester_id == user.id else row.requester_id
         for row in db.scalars(select(Connection).where(or_(Connection.requester_id == user.id, Connection.receiver_id == user.id))).all()
+        if row.status in CALL_ACTIVE_STATUSES
     })
     excluded.update({
         row.receiver_id if row.requester_id == user.id else row.requester_id
@@ -321,309 +354,126 @@ def discover_next(gender: str = "any", state: str = "", user: User = Depends(cur
     profile = db.scalar(select(Profile).where(Profile.user_id == user.id))
     if not profile or profile.age is None:
         raise HTTPException(409, "Complete your 18+ age before matching.")
+
+    cleanup_stale_calls(db)
+    if active_call_for_user(db, user.id):
+        raise HTTPException(409, "You are already connected to someone. End that call before finding another match.")
+
     items = ranked(user, db, gender, "district", state)
-    return {
-        "found": bool(items),
-        "person": items[0] if items else None,
-        "message": None if items else "No one is available right now. Please try again soon."
-    }
+    # Reserve the first available person. Reservation is the important part:
+    # once user A is shown user B, B cannot simultaneously be reserved by C.
+    for item in items:
+        candidate_id = item["user_id"]
+        # Lock the two user rows in deterministic order so two simultaneous matches
+        # cannot allocate the same person to different callers.
+        ids = sorted([user.id, candidate_id])
+        db.execute(select(User).where(User.id.in_(ids)).order_by(User.id).with_for_update()).all()
+        cleanup_stale_calls(db)
+        if active_call_for_user(db, user.id) or active_call_for_user(db, candidate_id):
+            db.rollback()
+            continue
+        if not presence.is_online(candidate_id):
+            db.rollback()
+            continue
+        reservation = Connection(requester_id=user.id, receiver_id=candidate_id, status="reserved")
+        db.add(reservation)
+        db.flush()
+        db.add(DiscoveryAction(user_id=user.id, candidate_id=candidate_id, action="reserved"))
+        db.commit()
+        db.refresh(reservation)
+        item["reservation_id"] = reservation.id
+        item["is_reserved"] = True
+        return {"found": True, "person": item, "reservation_id": reservation.id, "message": None}
+
+    return {"found": False, "person": None, "reservation_id": None, "message": "No one is available right now. Please try again soon."}
+
 
 @app.post("/discover/{candidate_id}/skip")
 def skip(candidate_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    if candidate_id == user.id or not db.get(User, candidate_id): raise HTTPException(404, "Person not found")
-    if is_blocked(db, user.id, candidate_id): raise HTTPException(403, "This person is blocked.")
+    if candidate_id == user.id or not db.get(User, candidate_id):
+        raise HTTPException(404, "Person not found")
+    if is_blocked(db, user.id, candidate_id):
+        raise HTTPException(403, "This person is blocked.")
+    row = db.scalar(select(Connection).where(
+        Connection.requester_id == user.id,
+        Connection.receiver_id == candidate_id,
+        Connection.status == "reserved",
+    ))
+    if row:
+        row.status = "ended"
     if not db.scalar(select(DiscoveryAction).where(DiscoveryAction.user_id == user.id, DiscoveryAction.candidate_id == candidate_id)):
-        db.add(DiscoveryAction(user_id=user.id, candidate_id=candidate_id, action="skip")); db.commit()
+        db.add(DiscoveryAction(user_id=user.id, candidate_id=candidate_id, action="skip"))
+    db.commit()
     return {"status": "skipped"}
+
 
 @app.post("/connections")
 def connect(data: ConnectionRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """Start (or resume) a call session with someone.
+    """Convert a reserved match into one private two-person call.
 
-    This intentionally does NOT make the two people friends. Starting a call
-    just opens a private room; becoming friends is a separate, explicit
-    action (see /connections/{id}/add-friend) so people are never added to
-    each other's friends list without choosing to.
+    Exactly one active call is allowed per user. The target must still be online,
+    and the pair is locked in a single transaction before the call is created.
     """
-    if data.receiver_id == user.id or not db.get(User, data.receiver_id): raise HTTPException(404, "Person not found")
-    # A call can only be started while the other person is currently online.
-    # Discovery is online-first and this second check prevents a stale result from opening an offline call.
+    if data.receiver_id == user.id or not db.get(User, data.receiver_id):
+        raise HTTPException(404, "Person not found")
+    candidate_id = data.receiver_id
     presence.sweep()
-    if not presence.is_online(data.receiver_id):
+    cleanup_stale_calls(db)
+
+    # Lock both user rows in deterministic order. This closes the race where
+    # users 1 and 3 both try to connect to user 2 at nearly the same moment.
+    ids = sorted([user.id, candidate_id])
+    db.execute(select(User).where(User.id.in_(ids)).order_by(User.id).with_for_update()).all()
+    cleanup_stale_calls(db)
+
+    if not presence.is_online(candidate_id):
+        db.rollback()
         raise HTTPException(409, "This person is no longer online. Find another match.")
-    if is_blocked(db, user.id, data.receiver_id): raise HTTPException(403, "You cannot connect with a blocked person.")
-    existing = db.scalar(select(Connection).where(or_(and_(Connection.requester_id == user.id, Connection.receiver_id == data.receiver_id), and_(Connection.requester_id == data.receiver_id, Connection.receiver_id == user.id))))
-    if existing:
-        if existing.status == "blocked": raise HTTPException(403, "This connection is blocked.")
-        if existing.status == "removed": existing.status = "calling"
-        record_history(db, user.id, data.receiver_id, "call_started", existing.id); db.commit()
-        return {"message": "Reconnected", "status": existing.status, "connection_id": existing.id, "is_friend": bool(existing.status == "connected" or accepted_friend_request(db, user.id, data.receiver_id))}
-    connection = Connection(requester_id=user.id, receiver_id=data.receiver_id, status="calling")
-    db.add(connection); db.flush()
-    db.add(DiscoveryAction(user_id=user.id, candidate_id=data.receiver_id, action="connected"))
-    record_history(db, user.id, data.receiver_id, "call_started", connection.id); record_history(db, data.receiver_id, user.id, "call_started", connection.id); db.commit()
-    return {"message": "Call started", "status": "calling", "connection_id": connection.id, "is_friend": bool(accepted_friend_request(db, user.id, data.receiver_id))}
+    if is_blocked(db, user.id, candidate_id):
+        db.rollback()
+        raise HTTPException(403, "You cannot connect with a blocked person.")
 
-def accepted_friend_request(db: Session, a: int, b: int):
-    return db.scalar(select(FriendRequest).where(
-        FriendRequest.status == "accepted",
-        or_(
-            and_(FriendRequest.requester_id == a, FriendRequest.receiver_id == b),
-            and_(FriendRequest.requester_id == b, FriendRequest.receiver_id == a),
-        ),
+    pair = db.scalar(select(Connection).where(or_(
+        and_(Connection.requester_id == user.id, Connection.receiver_id == candidate_id),
+        and_(Connection.requester_id == candidate_id, Connection.receiver_id == user.id),
+    )))
+    active_for_me = db.scalar(select(Connection).where(
+        Connection.status.in_(CALL_ACTIVE_STATUSES),
+        or_(Connection.requester_id == user.id, Connection.receiver_id == user.id),
+    ))
+    active_for_candidate = db.scalar(select(Connection).where(
+        Connection.status.in_(CALL_ACTIVE_STATUSES),
+        or_(Connection.requester_id == candidate_id, Connection.receiver_id == candidate_id),
     ))
 
+    if active_for_me and (not pair or active_for_me.id != pair.id):
+        db.rollback()
+        raise HTTPException(409, "You are already connected to someone. End the call before finding another match.")
+    if active_for_candidate and (not pair or active_for_candidate.id != pair.id):
+        db.rollback()
+        raise HTTPException(409, "This person is already talking to someone else. Find another match.")
 
-def pending_friend_request(db: Session, a: int, b: int):
-    return db.scalar(select(FriendRequest).where(
-        FriendRequest.status == "pending",
-        or_(
-            and_(FriendRequest.requester_id == a, FriendRequest.receiver_id == b),
-            and_(FriendRequest.requester_id == b, FriendRequest.receiver_id == a),
-        ),
-    ))
-
-
-@app.post("/connections/{connection_id}/friend-request")
-def send_friend_request(connection_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    row = db.get(Connection, connection_id)
-    if not row or user.id not in (row.requester_id, row.receiver_id):
-        raise HTTPException(404, "Connection not found")
-    other_id = row.receiver_id if row.requester_id == user.id else row.requester_id
-    if is_blocked(db, user.id, other_id):
-        raise HTTPException(403, "You cannot send a request to a blocked person.")
-    if accepted_friend_request(db, user.id, other_id):
-        return {"status": "accepted", "message": "You are already friends."}
-    existing = pending_friend_request(db, user.id, other_id)
-    if existing:
-        if existing.requester_id == user.id:
-            return {"status": "pending", "message": "Friend request already sent.", "request_id": existing.id}
-        raise HTTPException(409, "This person has already sent you a friend request. Open Requests to accept it.")
-    request = FriendRequest(requester_id=user.id, receiver_id=other_id, status="pending")
-    db.add(request)
-    db.commit(); db.refresh(request)
-    return {"status": "pending", "message": "Friend request sent. They need to accept it.", "request_id": request.id}
-
-
-@app.get("/friend-requests")
-def friend_requests(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    rows = db.scalars(select(FriendRequest).where(
-        or_(FriendRequest.receiver_id == user.id, FriendRequest.requester_id == user.id),
-        FriendRequest.status == "pending",
-    ).order_by(desc(FriendRequest.created_at))).all()
-    incoming, outgoing = [], []
-    for r in rows:
-        other_id = r.requester_id if r.receiver_id == user.id else r.receiver_id
-        other = db.get(User, other_id)
-        profile = db.scalar(select(Profile).where(Profile.user_id == other_id)) if other else None
-        if not other: continue
-        item = {"request_id": r.id, "user_id": other.id, "username": other.username, "is_online": presence.is_online(other.id), "created_at": r.created_at.isoformat(), **profile_payload(profile)}
-        (incoming if r.receiver_id == user.id else outgoing).append(item)
-    return {"incoming": incoming, "outgoing": outgoing, "incoming_count": len(incoming)}
-
-
-@app.post("/friend-requests/{request_id}/accept")
-def accept_friend_request(request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    request = db.get(FriendRequest, request_id)
-    if not request or request.receiver_id != user.id or request.status != "pending":
-        raise HTTPException(404, "Friend request not found")
-    if is_blocked(db, user.id, request.requester_id):
-        raise HTTPException(403, "Unblock this person before accepting the request.")
-    request.status = "accepted"
-    request.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    return {"status": "accepted", "message": "Friend request accepted."}
-
-
-@app.post("/friend-requests/{request_id}/reject")
-def reject_friend_request(request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    request = db.get(FriendRequest, request_id)
-    if not request or request.receiver_id != user.id or request.status != "pending":
-        raise HTTPException(404, "Friend request not found")
-    request.status = "rejected"
-    db.commit()
-    return {"status": "rejected"}
-
-
-@app.delete("/friend-requests/{request_id}")
-def cancel_friend_request(request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    request = db.get(FriendRequest, request_id)
-    if not request or request.requester_id != user.id or request.status != "pending":
-        raise HTTPException(404, "Friend request not found")
-    request.status = "cancelled"
-    db.commit()
-    return {"status": "cancelled"}
-
-
-@app.get("/connections")
-def connections(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    result, seen = [], set()
-    # Legacy/explicitly connected records remain compatible. New friendships
-    # come only from an accepted FriendRequest.
-    rows = db.scalars(select(Connection).where(or_(Connection.requester_id == user.id, Connection.receiver_id == user.id), Connection.status == "connected").order_by(desc(Connection.updated_at))).all()
-    for row in rows:
-        other_id = row.receiver_id if row.requester_id == user.id else row.requester_id
-        if other_id in seen or is_blocked(db, user.id, other_id): continue
-        other = db.get(User, other_id); profile = db.scalar(select(Profile).where(Profile.user_id == other_id)) if other else None
-        if other:
-            seen.add(other_id); result.append({"connection_id": row.id, "friend_request_id": None, **public_person(other, profile), "status": "connected", "connected_at": row.created_at.isoformat()})
-    accepted = db.scalars(select(FriendRequest).where(
-        FriendRequest.status == "accepted",
-        or_(FriendRequest.requester_id == user.id, FriendRequest.receiver_id == user.id),
-    ).order_by(desc(FriendRequest.updated_at))).all()
-    for fr in accepted:
-        other_id = fr.receiver_id if fr.requester_id == user.id else fr.requester_id
-        if other_id in seen or is_blocked(db, user.id, other_id): continue
-        other = db.get(User, other_id); profile = db.scalar(select(Profile).where(Profile.user_id == other_id)) if other else None
-        if other:
-            seen.add(other_id); result.append({"connection_id": None, "friend_request_id": fr.id, **public_person(other, profile), "status": "accepted", "connected_at": fr.updated_at.isoformat()})
-    return {"connections": result}
-
-@app.delete("/connections/{connection_id}")
-def remove_connection(connection_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    row = db.get(Connection, connection_id)
-    if row and user.id in (row.requester_id, row.receiver_id):
-        other_id = row.receiver_id if row.requester_id == user.id else row.requester_id
-        row.status = "removed"
+    if pair and pair.status in CALL_ACTIVE_STATUSES:
+        if pair.status == "reserved" and pair.requester_id == user.id:
+            pair.status = "calling"
+        record_history(db, user.id, candidate_id, "call_started", pair.id)
+        record_history(db, candidate_id, user.id, "call_started", pair.id)
         db.commit()
-        return {"status": "removed"}
-    raise HTTPException(404, "Connection not found")
+        return {"message": "Call started", "status": pair.status, "connection_id": pair.id, "is_friend": bool(accepted_friend_request(db, user.id, candidate_id))}
 
+    if pair:
+        pair.status = "calling"
+        connection = pair
+    else:
+        connection = Connection(requester_id=user.id, receiver_id=candidate_id, status="calling")
+        db.add(connection)
+        db.flush()
 
-@app.delete("/friendships/{friend_request_id}")
-def remove_friendship(friend_request_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    request = db.get(FriendRequest, friend_request_id)
-    if not request or user.id not in (request.requester_id, request.receiver_id) or request.status != "accepted":
-        raise HTTPException(404, "Friendship not found")
-    request.status = "removed"
+    db.add(DiscoveryAction(user_id=user.id, candidate_id=candidate_id, action="connected"))
+    record_history(db, user.id, candidate_id, "call_started", connection.id)
+    record_history(db, candidate_id, user.id, "call_started", connection.id)
     db.commit()
-    return {"status": "removed"}
+    return {"message": "Call started", "status": "calling", "connection_id": connection.id, "is_friend": bool(accepted_friend_request(db, user.id, candidate_id))}
 
 
-@app.get("/history")
-def history(limit: int = 50, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    limit = min(max(limit, 1), 100)
-    rows = db.scalars(
-        select(InteractionHistory)
-        .where(
-            InteractionHistory.user_id == user.id,
-            InteractionHistory.action == "call_started",
-        )
-        .order_by(desc(InteractionHistory.created_at))
-        .limit(limit)
-    ).all()
 
-    result = []
-    seen = set()
-    for row in rows:
-        # A call can create multiple call_started records; show the most recent
-        # call per person so History is a clean chronological list of people.
-        if row.other_user_id in seen:
-            continue
-        seen.add(row.other_user_id)
-        other = db.get(User, row.other_user_id)
-        profile = db.scalar(select(Profile).where(Profile.user_id == row.other_user_id)) if other else None
-        connection = db.get(Connection, row.connection_id) if row.connection_id else None
-        is_friend = bool((connection and connection.status == "connected") or accepted_friend_request(db, user.id, row.other_user_id))
-        if other:
-            result.append({
-                "id": row.id,
-                "user_id": other.id,
-                "username": other.username,
-                "connection_id": row.connection_id,
-                "friend_request_id": (accepted_friend_request(db, user.id, row.other_user_id).id if accepted_friend_request(db, user.id, row.other_user_id) else None),
-                "created_at": row.created_at.isoformat(),
-                "is_online": presence.is_online(other.id),
-                "is_friend": is_friend,
-                "is_blocked": is_blocked(db, user.id, other.id),
-                **profile_payload(profile),
-            })
-    return {"history": result}
-
-@app.get("/blocked")
-def blocked(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    rows = db.scalars(select(Block).where(Block.user_id == user.id).order_by(desc(Block.created_at))).all()
-    return {"blocked": [{"user_id": r.blocked_user_id, "username": db.get(User, r.blocked_user_id).username if db.get(User, r.blocked_user_id) else "", "created_at": r.created_at.isoformat()} for r in rows]}
-
-@app.post("/users/{target_id}/block")
-def block_user(target_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    if target_id == user.id or not db.get(User, target_id): raise HTTPException(404, "Person not found")
-    if not db.scalar(select(Block).where(Block.user_id == user.id, Block.blocked_user_id == target_id)):
-        db.add(Block(user_id=user.id, blocked_user_id=target_id))
-    connection = db.scalar(select(Connection).where(or_(and_(Connection.requester_id == user.id, Connection.receiver_id == target_id), and_(Connection.requester_id == target_id, Connection.receiver_id == user.id))))
-    if connection: connection.status = "blocked"
-    db.commit()
-    return {"status": "blocked"}
-
-@app.delete("/users/{target_id}/block")
-def unblock_user(target_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    row = db.scalar(select(Block).where(Block.user_id == user.id, Block.blocked_user_id == target_id))
-    if row: db.delete(row)
-    connection = db.scalar(select(Connection).where(or_(and_(Connection.requester_id == user.id, Connection.receiver_id == target_id), and_(Connection.requester_id == target_id, Connection.receiver_id == user.id))))
-    if connection and connection.status == "blocked": connection.status = "removed"
-    db.commit()
-    return {"status": "unblocked"}
-
-@app.post("/users/{target_id}/report")
-def report_user(target_id: int, data: ReportRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    if target_id == user.id or not db.get(User, target_id): raise HTTPException(404, "Person not found")
-    db.add(Report(reporter_id=user.id, reported_user_id=target_id, reason=data.reason.strip(), details=data.details.strip()))
-    db.commit()
-    return {"status": "reported", "message": "Thanks. Your report has been recorded."}
-
-# ---------------- Real-time WebRTC signaling + chat ----------------
-class ConnectionManager:
-    def __init__(self): self.rooms: Dict[int, Dict[int, WebSocket]] = {}
-    async def connect(self, connection_id, user_id, websocket):
-        await websocket.accept(); room = self.rooms.setdefault(connection_id, {}); peers = list(room.keys()); room[user_id] = websocket; return peers
-    def disconnect(self, connection_id, user_id):
-        room = self.rooms.get(connection_id)
-        if not room: return
-        room.pop(user_id, None)
-        if not room: self.rooms.pop(connection_id, None)
-    async def send_to_peer(self, connection_id, sender_id, payload):
-        for uid, socket in list(self.rooms.get(connection_id, {}).items()):
-            if uid != sender_id:
-                try: await socket.send_json(payload)
-                except Exception: pass
-    async def send_to_all(self, connection_id, payload):
-        for socket in list(self.rooms.get(connection_id, {}).values()):
-            try: await socket.send_json(payload)
-            except Exception: pass
-manager = ConnectionManager()
-
-def websocket_user(token: str, db: Session):
-    try: return db.get(User, decode_token(token))
-    except HTTPException: return None
-
-@app.websocket("/ws/connection/{connection_id}")
-async def connection_socket(websocket: WebSocket, connection_id: int):
-    token = websocket.query_params.get("token")
-    if not token: await websocket.close(code=1008); return
-    db = next(get_db())
-    try:
-        user = websocket_user(token, db); connection = db.get(Connection, connection_id)
-        if not user or not connection or user.id not in (connection.requester_id, connection.receiver_id) or connection.status not in ("connected", "calling"): await websocket.close(code=1008); return
-        peer_id = connection.receiver_id if connection.requester_id == user.id else connection.requester_id
-        if is_blocked(db, user.id, peer_id): await websocket.close(code=1008); return
-        peers = await manager.connect(connection_id, user.id, websocket)
-        presence.touch(user.id)
-        await websocket.send_json({"type": "room_state", "user_id": user.id, "peer_id": peer_id, "peers": peers})
-        if peers: await manager.send_to_peer(connection_id, user.id, {"type": "peer_joined", "user_id": user.id})
-        while True:
-            message = await websocket.receive_json(); msg_type = message.get("type")
-            presence.touch(user.id)
-            if msg_type in {"offer", "answer", "ice-candidate"}:
-                await manager.send_to_peer(connection_id, user.id, {"type": msg_type, "from": user.id, "data": message.get("data")})
-            elif msg_type == "chat":
-                text = str(message.get("text", "")).strip()
-                if text and len(text) <= 1000: await manager.send_to_all(connection_id, {"type": "chat", "from": user.id, "text": text})
-            elif msg_type == "hangup":
-                record_history(db, user.id, peer_id, "call_ended", connection.id); db.commit()
-                await manager.send_to_peer(connection_id, user.id, {"type": "hangup", "from": user.id})
-    except WebSocketDisconnect:
-        manager.disconnect(connection_id, user.id if 'user' in locals() and user else -1)
-        if 'user' in locals() and user: await manager.send_to_all(connection_id, {"type": "peer_left", "user_id": user.id})
-    except Exception:
-        if 'user' in locals() and user: manager.disconnect(connection_id, user.id)
-    finally: db.close()
