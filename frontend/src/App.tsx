@@ -380,7 +380,7 @@ function CallRoom({
         </div>
 
         <div className="call-topbar-actions">
-          <button className="link-action" onClick={onNext} title="Try someone else">Try someone else →</button>
+          <button className="link-action" onClick={() => { try { wsRef.current?.send(JSON.stringify({ type: "hangup" })); } catch {} onNext(); }} title="Try someone else">Try someone else →</button>
           <div className="more-wrap">
             <button className="more-trigger" onClick={() => setMoreOpen((v) => !v)} aria-expanded={moreOpen} aria-haspopup="menu" title="More actions">
               <MoreHorizontal size={18} /> <span>More</span>
@@ -811,7 +811,13 @@ export default function App() {
     }
   }
 
+  async function endCurrentConnection(id = connectionId) {
+    if (!id) return;
+    try { await api(`/connections/${id}/end`, { method: "POST" }); } catch {}
+  }
+
   async function nextFromCall() {
+    await endCurrentConnection();
     setStage("finding");
     setConnectionId(null);
     setFriendAdded(false);
@@ -844,7 +850,13 @@ export default function App() {
       setFriendRequestState(Boolean(d.is_friend) ? "accepted" : "none");
       setStage("call");
     } catch (e) {
-      setMessage((e as Error).message);
+      const text = (e as Error).message || "";
+      if (/already (talking|connected)|no longer online|another match/i.test(text)) {
+        setMessage("That person was taken by another live connection. Finding someone else…");
+        await next();
+        return;
+      }
+      setMessage(text);
     }
   }
 
@@ -1408,7 +1420,7 @@ export default function App() {
             currentUserId={currentUserId || 0}
             person={person}
             connectionId={connectionId}
-            onEnd={() => { setStage("home"); setConnectionId(null); }}
+            onEnd={() => { void endCurrentConnection(); setStage("home"); setConnectionId(null); }}
             onNext={nextFromCall}
             onAddFriend={addFriendFromCall}
             friendAdded={friendAdded}
