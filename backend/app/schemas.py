@@ -76,6 +76,20 @@ class LocationRequest(BaseModel):
     state: str = Field(default="", max_length=100)
     country: str = Field(default="", max_length=80)
 
+REPORT_REASONS = {
+    "Harassment or abusive behavior", "Spam or scam", "Hate or hateful conduct",
+    "Sexual or inappropriate content", "Impersonation", "Threats or dangerous behavior", "Other",
+    "Possibly under 18",
+}
+
+
 class ReportRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=80)
     details: str = Field(default="", max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def known_reason(cls, v: str) -> str:
+        if v not in REPORT_REASONS:
+            raise ValueError("Unknown report reason")
+        return v
