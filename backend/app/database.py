@@ -1,12 +1,14 @@
-import os
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from dotenv import load_dotenv
 
 load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./connectai.db")
+from . import config  # noqa: E402  (after load_dotenv so .env is honoured)
+
+DATABASE_URL = config.DATABASE_URL
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True,
+                       **({} if DATABASE_URL.startswith("sqlite") else {"pool_size": 5, "max_overflow": 5, "pool_recycle": 1800}))
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Base(DeclarativeBase):
@@ -44,6 +46,12 @@ def migrate_schema():
         for name, definition in additions.items():
             if name not in profile_columns:
                 conn.execute(text(f'ALTER TABLE profiles ADD COLUMN {name} {definition}'))
+        for name, definition in {"ended_reason": "VARCHAR(40)", "accepted_at": "TIMESTAMP", "active_at": "TIMESTAMP", "ended_at": "TIMESTAMP"}.items():
+            if name not in connection_columns:
+                conn.execute(text(f"ALTER TABLE connections ADD COLUMN {name} {definition}"))
+        # Legacy status 'calling' meant "invited"; 'connected' was an unused default.
+        conn.execute(text("UPDATE connections SET status='ringing' WHERE status='calling'"))
+        conn.execute(text("UPDATE connections SET status='ended' WHERE status='connected'"))
         if "updated_at" not in connection_columns:
             conn.execute(text("ALTER TABLE connections ADD COLUMN updated_at TIMESTAMP"))
             conn.execute(text("UPDATE connections SET updated_at = created_at WHERE updated_at IS NULL"))
