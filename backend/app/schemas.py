@@ -1,5 +1,4 @@
 from pydantic import BaseModel, Field, field_validator
-
 GENDERS = {"male", "female", "non_binary", "prefer_not_to_say"}
 PREFERRED_GENDERS = {"any", "male", "female", "non_binary"}
 VIBES = {"Chill", "Deep talks", "Playful", "Flirty", "Just here to vibe"}
