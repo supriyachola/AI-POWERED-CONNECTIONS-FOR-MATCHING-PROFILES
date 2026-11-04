@@ -174,3 +174,4 @@ WebRTC <----> TURN relay when P2P fails
 ```
 
 When more than one backend instance is used, move WebSocket presence/room state out of process into Redis or a dedicated realtime service. Do not depend on Python process memory for cross-instance rooms.
+
